@@ -226,6 +226,7 @@ class Tenant {
         .catch((err) => { this.status = `agent bot sync failed: ${errText(err)}`; ctx.logger.error(this.status, { companyId }); });
       void sync();
       this.timers.push(setInterval(sync, SYNC_EVERY_MS));
+      void ensureSkill(companyId).catch((err) => warn("could not install the Mattermost skill", { err: errText(err) }));
       if (cards) {
         const poll = () => cards.poll().catch((err) => warn("decision cards poll failed", { err: errText(err) }));
         this.timers.push(setTimeout(poll, 20_000), setInterval(poll, CARDS_EVERY_MS));
@@ -359,6 +360,13 @@ function configure(companyId: string, config: Record<string, unknown>): Promise<
   return run;
 }
 
+/** Installs the plugin's Mattermost skill in a company's library, or brings it back to this version's text. */
+async function ensureSkill(companyId: string): Promise<string | null> {
+  let r = await ctx.skills.managed.reconcile("mattermost", companyId);
+  if (r.skill && r.defaultDrift?.changedFiles.length) r = await ctx.skills.managed.reset("mattermost", companyId);
+  return r.skill?.key ?? null;
+}
+
 async function saveBoot(companyId: string, config: Record<string, unknown>): Promise<void> {
   const all = ((await ctx.state.get(BOOT)) as Record<string, Record<string, unknown>> | null) ?? {};
   all[companyId] = config;
@@ -395,6 +403,11 @@ const plugin = definePlugin({
         }
       }
       return { detectedUrl: await detectPublicUrl(), connected: Boolean(manager), status: tenant?.status ?? null, versionNote, channels, accounts };
+    });
+    // The company's Mattermost skill, (re)installed from the manifest; the settings page assigns it to agents.
+    ctx.actions.register("skill", async (params) => {
+      if (typeof params.companyId !== "string") throw new Error("companyId is required");
+      return { key: await ensureSkill(params.companyId) };
     });
     ctx.actions.register("verify-url", async (params) => verifyUrl(String(params.url ?? ""), PLUGIN_KEY));
     const quietly = (what: string, fn: () => Promise<void>) => fn().catch((err) => ctx.logger.warn(what, { err: errText(err) }));

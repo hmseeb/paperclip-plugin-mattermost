@@ -234,6 +234,8 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   const [saved, setSaved] = useState(false);
   const [check, setCheck] = useState<{ url: string; ok: boolean | null; detail: string } | null>(null);
   const verify = usePluginAction("verify-url");
+  const skill = usePluginAction("skill");
+  const [skillNote, setSkillNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (!companyId) return;
@@ -288,8 +290,24 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   const token = config.botToken as { secretId?: string } | undefined;
   const toggle = (id: string) => { setSaved(false); const next = new Set(selected); if (next.has(id)) next.delete(id); else next.add(id); setSelected(next); };
 
+  /** Adds the plugin's Mattermost skill to these agents, keeping their other skills. Returns a note when some failed. */
+  async function giveSkill(targets: AgentRow[]): Promise<string | null> {
+    try {
+      const { key } = (await skill({ companyId })) as { key: string | null };
+      if (!key) return "The Mattermost skill is not installed yet; save again in a minute.";
+      const failed: string[] = [];
+      for (const a of targets) {
+        await api(`/api/agents/${a.id}/skills/sync`, { method: "POST", body: JSON.stringify({ mode: "add", desiredSkills: [key] }) }).catch(() => failed.push(a.name));
+      }
+      return failed.length ? `Could not give the Mattermost skill to ${failed.join(", ")}; add it on their Skills tab.` : null;
+    } catch (e) {
+      return `Could not give agents the Mattermost skill: ${String((e as Error)?.message ?? e).slice(0, 200)}`;
+    }
+  }
+
   async function save() {
     setSaveError(null);
+    setSkillNote(null);
     const errors = validate(config!);
     if (agentsMode === "selected" && !pickedAgents.size) errors.agents = "Tick at least one agent, or choose All agents.";
     if (access === "selected" && !grants.size) errors.access = "Tick at least one person, or choose Everyone.";
@@ -305,6 +323,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       await api(`/api/plugins/${PLUGIN}/config`, { method: "POST", body: JSON.stringify({ companyId, configJson: next }) });
       setConfig(next);
       setSaved(true);
+      setSkillNote(await giveSkill(agentsMode === "selected" ? agents.filter((a) => pickedAgents.has(a.id)) : agents));
     } catch (e) {
       setSaveError(saveErrorText(String((e as Error)?.message ?? e)));
     } finally {
@@ -358,7 +377,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
           onChange={(e) => set({ agentTurnLimit: Math.min(100, Math.max(1, Math.round(Number(e.target.value) || 10))) })} />
       </Field>
 
-      <Field label="Agents in Mattermost" error={fieldErrors.agents} help="Each agent shown here gets its own Mattermost bot. Unticking an agent switches its bot off but keeps it, with its history, for when you tick it again.">
+      <Field label="Agents in Mattermost" error={fieldErrors.agents} help="Each agent shown here gets its own Mattermost bot, and saving gives it the Mattermost skill so it can message people from any run. Unticking an agent switches its bot off but keeps it, with its history, for when you tick it again.">
         <Modes value={agentsMode} onChange={(v) => { setAgentsMode(v as "all" | "selected"); setSaved(false); }}
           options={[["all", "All agents (new agents join automatically)"], ["selected", "Only the agents I pick"]]} />
         {agentsMode === "selected" ? (
@@ -391,6 +410,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
         <button style={s.primary} onClick={save} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
         {saved ? <span style={s.ok}>Saved</span> : null}
         {saveError ? <span style={s.bad}>{saveError}</span> : null}
+        {skillNote ? <span style={s.bad}>{skillNote}</span> : null}
       </div>
     </div>
   );

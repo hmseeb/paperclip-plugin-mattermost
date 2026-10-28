@@ -1,11 +1,12 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
+import { SKILL } from "./help.ts";
 
 const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ routeKey, method, path, auth: "agent" as const, capability: "api.routes.register" as const });
 
 const manifest: PaperclipPluginManifestV1 = {
   id: "mattermost-bridge",
   apiVersion: 1,
-  version: "0.13.0",
+  version: "0.14.0",
   displayName: "Mattermost",
   description:
     "Every agent becomes its own Mattermost bot. DM an agent or mention it in a channel and it answers in the thread, showing its steps as it works; follow-ups continue the conversation. Paperclip approvals arrive with Approve / Reject buttons.",
@@ -33,6 +34,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "issue.comments.create_human_attributed",
     "issue.comments.read",
     "api.routes.register",
+    "skills.managed",
   ],
   entrypoints: { worker: "./dist/worker.js", ui: "./dist/ui" },
   // Replaces the generated form: approvers picked from members, URL detected and checked.
@@ -56,6 +58,8 @@ const manifest: PaperclipPluginManifestV1 = {
     route("update-channel", "POST", "/mm/channels/:channel/update"),
     route("archive", "POST", "/mm/channels/:channel/archive"),
   ],
+  // Installed in each company's skill library; the settings page adds it to every agent with a bot.
+  skills: [{ skillKey: "mattermost", displayName: "Mattermost", slug: "mattermost", description: "Talk to people and agents in Mattermost as your own bot.", markdown: SKILL }],
   webhooks: [
     { endpointKey: "actions", displayName: "Mattermost buttons", description: "Approve / Reject clicks on approval posts. Every click carries a signature the plugin checks." },
   ],

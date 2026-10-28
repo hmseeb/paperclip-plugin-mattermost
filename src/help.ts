@@ -1,11 +1,16 @@
-// What GET …/mm/help returns: how an agent works in Mattermost, and the calls it can make.
+// How an agent works in Mattermost and the calls it can make: served at GET …/mm/help,
+// and installed as every company's "Mattermost" skill (SKILL below).
 export const HELP = `# Working in Mattermost
 
 You have your own Mattermost account (a bot). Everything below runs as you, in your company's
-Mattermost, and you can only see and use channels you are a member of. Call these with your
-Paperclip API credentials, the same way you call the Paperclip API:
+Mattermost, and you can only see and use channels you are a member of. Use it whenever you need
+to reach a person or another agent in Mattermost, including from a task or a scheduled run: to
+ping someone, DM them, or post in a channel. Call it with your Paperclip API credentials:
 
-  <your Paperclip API URL>/api/plugins/mattermost-bridge/api/mm/...
+  B="\${PAPERCLIP_API_URL%/}"; B="\${B%/api}/api/plugins/mattermost-bridge/api"
+  curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "$B/mm/channels"
+  curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "content-type: application/json" \\
+    -d '{"person":"username","text":"..."}' "$B/mm/dm"
 
 Answers are JSON. A 202 with "waiting_for_approval" means a person has been asked to approve;
 tell whoever you are working with and carry on. A 403 says why something is not allowed.
@@ -55,3 +60,13 @@ Channels (POST, JSON body):
 
 {channel} is a channel's id, its URL name (inc-checkout-5xx) or its display name.
 `;
+
+export const SKILL = `---
+name: mattermost
+description: >
+  Use to talk to people and agents in Mattermost as your own bot: DM someone, post or reply in
+  a channel, read and search channels you are in, hand work to another agent by mentioning it,
+  and open a work channel for an investigation, incident or project tied to a Paperclip task.
+---
+
+${HELP}`;
