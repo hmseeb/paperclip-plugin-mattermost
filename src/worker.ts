@@ -222,11 +222,14 @@ class Tenant {
       const who = req.user_name ? `@${req.user_name}` : "Someone";
       await this.manager.request("PUT", `/posts/${req.post_id}/patch`, { props: chosenProps(choice.choice, who) }).catch(() => {});
       // The pick reaches the agent as that person's next message in the thread; the
-      // card's post id keeps a double click from sending it twice.
-      void this.bridge.handle({
+      // card's post id keeps a double click from sending it twice. Detached: the agent
+      // answers long after this webhook request ends, and Paperclip refuses calls made
+      // under a finished request ("missing, expired, or unknown invocation scope").
+      const bridge = this.bridge;
+      detached(() => void bridge.handle({
         post: { id: `choice:${req.post_id}`, user_id: req.user_id, channel_id: choice.channelId, root_id: choice.rootId, message: choice.choice },
         channelType: choice.channelType, channelName: choice.channelName,
-      });
+      }));
       return;
     }
     if (this.approvals) await this.notify(req, await this.approvals.click(req).catch(failed));

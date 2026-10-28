@@ -9,21 +9,27 @@ import { MattermostClient } from "./mattermost.ts";
 
 type Log = (msg: string, meta?: Record<string, unknown>) => void;
 export interface AgentInfo { id: string; name: string; title?: string | null; /** Fetchable URL of the agent's portrait. */ avatarUrl?: string | null }
-interface Bot { user_id: string; username: string; display_name: string; description: string; delete_at: number }
+interface Bot { user_id: string; username: string; display_name: string; description: string; delete_at: number; owner_id?: string }
+type Manager = Pick<MattermostClient, "request" | "setProfileImage" | "botUserId">;
+type BotClient = Pick<MattermostClient, "init" | "connect" | "close" | "connected"> & Member["chat"];
+
+/** Whether a failed request means "it does not exist", as opposed to "could not ask right now". */
+const notFound = (err: unknown) => (err as { status?: number })?.status === 404;
 const TOKEN_DESCRIPTION = "paperclip-plugin";
 
 export class AgentBots {
-  private members = new Map<string, Member & { client: MattermostClient }>();
-  private manager: MattermostClient;
-  private url: string;
+  private members = new Map<string, Member & { client: BotClient }>();
+  private manager: Manager;
+  private newClient: (token: string) => BotClient;
   private listAgents: () => Promise<AgentInfo[]>;
   private store: Store;
   private log: Log;
   private onPosted: (evt: PostedEvent) => void;
 
-  constructor(manager: MattermostClient, url: string, listAgents: () => Promise<AgentInfo[]>, store: Store, log: Log, onPosted: (evt: PostedEvent) => void) {
+  constructor(manager: Manager, url: string, listAgents: () => Promise<AgentInfo[]>, store: Store, log: Log, onPosted: (evt: PostedEvent) => void,
+    newClient?: (token: string) => BotClient) {
     this.manager = manager;
-    this.url = url;
+    this.newClient = newClient ?? ((token) => new MattermostClient(url, token, log));
     this.listAgents = listAgents;
     this.store = store;
     this.log = log;
@@ -43,7 +49,7 @@ export class AgentBots {
 
   /** The Mattermost client of an agent's bot, for posts beyond chat replies. */
   clientOf(agentId: string): MattermostClient | undefined {
-    return this.members.get(agentId)?.client;
+    return this.members.get(agentId)?.client as MattermostClient | undefined;
   }
 
   get connected(): number {
@@ -54,12 +60,33 @@ export class AgentBots {
     return this.members.size;
   }
 
+  /**
+   * The bot, or null only when Mattermost says it does not exist. Any other failure (the
+   * server restarting, a timeout) throws, so the agent is skipped this round rather than
+   * given a second bot: that is how Carma's Operations Agent became @operations-agent-agent
+   * while @operations-agent, the one people mention, was left with nobody behind it.
+   */
   private async bot(id: string): Promise<Bot | null> {
     try {
       return await this.manager.request<Bot>("GET", `/bots/${id}?include_deleted=true`);
-    } catch {
-      return null;
+    } catch (err) {
+      if (notFound(err)) return null;
+      throw err;
     }
+  }
+
+  /** The bot at an agent's own username, if it is one of ours and no other agent uses it. */
+  private async reclaimable(agent: AgentInfo, map: Record<string, string>): Promise<Bot | null> {
+    let user: { id: string; is_bot?: boolean };
+    try {
+      user = await this.manager.request("GET", `/users/username/${botUsername(agent.name)}`);
+    } catch (err) {
+      if (notFound(err)) return null;
+      throw err;
+    }
+    if (!user.is_bot || Object.entries(map).some(([other, id]) => other !== agent.id && id === user.id)) return null;
+    const bot = await this.bot(user.id);
+    return bot && bot.owner_id === this.manager.botUserId ? bot : null;
   }
 
   private async createBot(agent: AgentInfo): Promise<Bot> {
@@ -96,9 +123,21 @@ export class AgentBots {
       try {
         let bot = map[agent.id] ? await this.bot(map[agent.id]) : null;
         if (!bot) {
-          bot = await this.createBot(agent);
-          this.log("created agent bot", { agent: agent.name, username: bot.username });
-        } else {
+          // A bot this plugin made earlier for the agent (its saved list was lost, say) is reused.
+          const mine = await this.reclaimable(agent, map);
+          bot = mine ?? await this.createBot(agent);
+          this.log(mine ? "reused the agent's existing bot" : "created agent bot", { agent: agent.name, username: bot.username });
+        } else if (bot.username !== botUsername(agent.name)) {
+          // On a fallback name (taken at the time): move back to the agent's own bot when
+          // it is ours and free, and switch the stand-in off.
+          const original = await this.reclaimable(agent, map);
+          if (original && original.user_id !== bot.user_id) {
+            await this.manager.request("POST", `/bots/${bot.user_id}/disable`).catch(() => {});
+            this.log("moved agent back to its own bot", { agent: agent.name, from: bot.username, to: original.username });
+            bot = original;
+          }
+        }
+        {
           if (bot.delete_at > 0) await this.manager.request("POST", `/bots/${bot.user_id}/enable`);
           if (bot.display_name !== agent.name) {
             bot = await this.manager.request<Bot>("PUT", `/bots/${bot.user_id}`, { username: bot.username, display_name: agent.name, description: agent.title || bot.description });
@@ -125,7 +164,7 @@ export class AgentBots {
           continue;
         }
         current?.client.close();
-        const client = new MattermostClient(this.url, await this.mintToken(bot.user_id), this.log);
+        const client = this.newClient(await this.mintToken(bot.user_id));
         await client.init();
         client.connect(this.onPosted);
         this.members.set(agent.id, { agentId: agent.id, agentName: agent.name, botUserId: bot.user_id, username: bot.username, chat: client, client });

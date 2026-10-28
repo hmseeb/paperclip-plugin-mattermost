@@ -33,7 +33,7 @@ export class MattermostClient implements ChatApi {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
-    if (!r.ok) throw new Error(`Mattermost ${method} ${path}: ${r.status} ${(await r.text()).slice(0, 200)}`);
+    if (!r.ok) throw Object.assign(new Error(`Mattermost ${method} ${path}: ${r.status} ${(await r.text()).slice(0, 200)}`), { status: r.status });
     return (r.status === 204 ? null : await r.json()) as T;
   }
 
