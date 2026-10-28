@@ -1,0 +1,27 @@
+# Publishes to npm when a version tag (v0.12.0, ...) is pushed. Uses npm trusted
+# publishing: npm trusts this workflow by its GitHub identity, so there is no token
+# to store or rotate, and each release carries provenance linking it to the commit.
+name: Publish to npm
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # the identity npm checks
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: The tag matches package.json
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: npm ci
+      # prepublishOnly builds against PAPERCLIP_REF and runs the tests first.
+      - run: npm publish --access public --provenance

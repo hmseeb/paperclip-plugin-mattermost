@@ -74,6 +74,16 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 - `scripts/deploy-remote.sh` copies a build to a Paperclip running in Docker on another machine over ssh, and reloads it with Paperclip's CLI.
 - `test/live-mattermost.ts` and `test/live-roster.ts` run against a real Mattermost.
 
+## Releasing
+
+Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
+
+```bash
+git tag v0.12.0 && git push origin main v0.12.0
+```
+
+GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.
+
 ## License
 
 MIT
