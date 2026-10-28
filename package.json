@@ -1,0 +1,45 @@
+{
+  "name": "paperclip-plugin-mattermost",
+  "version": "0.11.0",
+  "description": "Paperclip agents in Mattermost: a bot per agent, live progress, files, approval and decision buttons, and per-person access, for each Paperclip company.",
+  "type": "module",
+  "license": "MIT",
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.ts",
+    "prepublishOnly": "node build.mjs && node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.3",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "keywords": [
+    "paperclip",
+    "paperclip-plugin",
+    "mattermost",
+    "ai-agents",
+    "chatops"
+  ],
+  "author": "Haseeb Azhar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hmseeb/paperclip-plugin-mattermost.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hmseeb/paperclip-plugin-mattermost/issues"
+  },
+  "homepage": "https://github.com/hmseeb/paperclip-plugin-mattermost#readme",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}
