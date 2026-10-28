@@ -5,7 +5,7 @@ Your [Paperclip](https://github.com/paperclipai/paperclip) agents as Mattermost 
 ## What it does
 
 - **A bot per agent.** Bots are created, renamed and switched off as agents change (every 5 minutes). Choose all agents, or only the ones you pick.
-- **You see it working.** The agent's bot reacts 👀 to your message straight away. Its reply starts as _thinking…_ and lists the steps it runs, then the answer replaces the list.
+- **You see it working.** The agent's bot reacts 👀 to your message straight away, and shows Mattermost's "is typing…" indicator until its answer arrives.
 - **Files both ways.** Attach files to a message and the agent can read them. Files the agent saves are attached to its reply.
 - **Choices as buttons.** An agent can offer options (`choices: A | B | C` on its last line), which appear as buttons. A click is sent back as your answer.
 - **Approvals with buttons.** Every Paperclip approval is posted in an approvals channel with Approve / Reject buttons, including hires, budget overrides, board approvals and high-risk tool calls. An approval raised during a conversation also appears in that thread.
@@ -60,7 +60,6 @@ Or install it from **Settings → Plugins** in Paperclip.
 - **Multi-choice questions** and free-text "Other" answers are answered in Paperclip; the card links there.
 - **Mattermost can't hide bots** from particular people. Someone without access can still DM an agent bot; they get a private note and the agent doesn't run.
 - **Agents with a custom uploaded portrait** keep the default bot picture, because those images need a Paperclip login to download.
-- **Live progress** shows steps for agents run through ACPX (Claude Code, and others Paperclip runs that way). Other adapters show only _thinking…_.
 
 ## Development
 

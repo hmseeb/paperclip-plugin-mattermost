@@ -65,7 +65,7 @@ class Tenant {
         const key = `plugin:${PLUGIN_KEY}:session:${taskKey}`;
         return (await ctx.agents.sessions.create(agentId, companyId, { taskKey: key, reason: "Mattermost thread" })).sessionId;
       },
-      ask(sessionId, prompt, onOutput) {
+      ask(sessionId, prompt) {
         return new Promise((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error("no reply after 30 minutes")), ASK_TIMEOUT_MS);
           ctx.agents.sessions
@@ -73,7 +73,6 @@ class Tenant {
               prompt,
               reason: "Mattermost message",
               onEvent: (e) => {
-                if (e.eventType === "chunk" && e.stream === "stdout" && e.message) onOutput?.(e.message);
                 if (e.eventType === "done") { clearTimeout(timer); resolve(e.message); }
                 if (e.eventType === "error") { clearTimeout(timer); reject(new Error(e.message || "the agent run failed")); }
               },

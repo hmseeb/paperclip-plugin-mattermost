@@ -1,6 +1,5 @@
 import { extractChoices, MAX_CHOICES } from "./choices.ts";
 import type { FileChat, Files } from "./files.ts";
-import { Progress, THINKING } from "./progress.ts";
 
 // Mattermost <-> Paperclip agent bridge. Pure logic: chat, agents, directory and
 // storage are injected, so it is unit-tested with fakes (test/bridge.test.ts).
@@ -31,7 +30,6 @@ export interface PostedEvent {
 /** Posting as one agent's bot. */
 export interface ChatApi extends FileChat {
   createPost(channelId: string, rootId: string, message: string, props?: Record<string, unknown>): Promise<{ id: string }>;
-  patchPost(postId: string, message: string): Promise<void>;
   typing(channelId: string, rootId: string): Promise<void>;
   react(postId: string, emoji: string): Promise<void>;
 }
@@ -63,11 +61,8 @@ export interface Roster {
 
 export interface Agents {
   createSession(agentId: string, taskKey: string): Promise<string>;
-  /**
-   * Resolves with the final reply text (null when the agent said nothing); rejects on failure.
-   * `onOutput` receives the run's live stdout as it arrives.
-   */
-  ask(sessionId: string, prompt: string, onOutput?: (chunk: string) => void): Promise<string | null>;
+  /** Resolves with the final reply text (null when the agent said nothing); rejects on failure. */
+  ask(sessionId: string, prompt: string): Promise<string | null>;
 }
 
 export interface Store {
@@ -83,7 +78,9 @@ interface ThreadState {
   sessionId: string;
 }
 
-export const PROGRESS_EVERY_MS = 2000; // at most one progress edit per post this often
+export const TYPING_EVERY_MS = 3000; // Mattermost drops a typing indicator after ~5s
+/** The placeholder earlier versions posted while an agent worked; still in old threads. */
+const OLD_PLACEHOLDER = /^_(thinking…|.+ is working on it…)_/;
 export const MAX_POST = 15000; // Mattermost's limit is 16383; leave room
 export const MAX_HISTORY = 8000; // characters of earlier thread messages sent with a follow-up
 const MENTION = /(?:^|[^\w@])@([a-z0-9][a-z0-9._-]*)/gi;
@@ -180,7 +177,7 @@ export class Bridge {
     const roster = this.roster();
     const lines: string[] = [];
     for (const p of await this.directory.threadPosts(rootId)) {
-      if (p.id === currentId || p.type || !p.message.trim() || p.message.startsWith(THINKING)) continue;
+      if (p.id === currentId || p.type || !p.message.trim() || OLD_PLACEHOLDER.test(p.message)) continue;
       const who = p.user_id === me.botUserId ? "You" : `@${roster.byBotId(p.user_id)?.username ?? (await this.directory.userName(p.user_id)).username}`;
       lines.push(`${who}: ${p.message}`);
     }
@@ -215,10 +212,27 @@ export class Bridge {
     const where = isDirect ? "a direct message" : `#${evt.channelName}`;
     const history = post.root_id ? await this.history(post.root_id, post.id, member) : "";
 
-    const progress = new Progress();
-    const placeholder = await member.chat.createPost(post.channel_id, rootId, progress.render());
-    await member.chat.typing(post.channel_id, rootId).catch(() => {});
+    // Mattermost's own "is typing…" indicator, refreshed until the reply is posted: it
+    // fades after a few seconds unless sent again, and an agent can work for minutes.
+    // Sent for the thread (where the reply lands) and the channel (where people often
+    // look), since Mattermost shows each only in its own view.
+    const typing = () => {
+      void member.chat.typing(post.channel_id, rootId).catch(() => {});
+      void member.chat.typing(post.channel_id, "").catch(() => {});
+    };
+    typing();
+    const typingTimer = setInterval(typing, TYPING_EVERY_MS);
+    try {
+      await this.answer(evt, member, rootId, threadKey, thread, { sender, where, history, text, fileIds });
+    } finally {
+      clearInterval(typingTimer);
+    }
+  }
 
+  private async answer(evt: PostedEvent, member: Member, rootId: string, threadKey: string, thread: ThreadState | null,
+    m: { sender: { username: string; displayName: string }; where: string; history: string; text: string; fileIds: string[] }): Promise<void> {
+    const { post } = evt;
+    const { sender, where, history, text, fileIds } = m;
     const attached = fileIds.length ? await this.files!.receive(member.chat, post.id, fileIds) : [];
     const outbox = this.files ? await this.files.outbox(post.id).catch(() => null) : null;
     const prompt = `${sender.displayName} (@${sender.username}) wrote to you (@${member.username}) in ${where} on Mattermost. Your reply is posted back there, so answer in Markdown. ` +
@@ -227,25 +241,6 @@ export class Bridge {
       (attached.length ? `\n\nAttached files, saved on disk (read them at these paths):\n${attached.join("\n")}` : "") +
       (outbox ? `\n\nTo send files back with your reply, save them in ${outbox}` : "");
 
-    // Progress edits are throttled, and the last one is awaited before the answer is
-    // written, so a late progress edit can never overwrite the reply.
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let edit = Promise.resolve();
-    let finished = false;
-    const onOutput = (chunk: string) => {
-      if (finished || !progress.feed(chunk) || timer) return;
-      timer = setTimeout(() => {
-        timer = null;
-        if (finished) return;
-        edit = edit.then(() => member.chat.patchPost(placeholder.id, progress.render())).catch(() => {});
-      }, PROGRESS_EVERY_MS);
-    };
-    const settle = async () => {
-      finished = true;
-      if (timer) clearTimeout(timer);
-      await edit;
-    };
-
     let reply: string | null;
     const here = { channelId: post.channel_id, rootId };
     this.active.set(member.agentId, here);
@@ -253,29 +248,27 @@ export class Bridge {
       let sessionId = thread && thread.agentId === member.agentId ? thread.sessionId : null;
       try {
         if (!sessionId) throw new Error("no session yet");
-        reply = await this.agents.ask(sessionId, prompt, onOutput);
+        reply = await this.agents.ask(sessionId, prompt);
       } catch (first) {
         if (sessionId) this.log("session unusable, starting a new one", { sessionId, err: String(first) });
         sessionId = await this.agents.createSession(member.agentId, `mattermost:${rootId}`);
         await this.store.set(threadKey, { agentId: member.agentId, sessionId } satisfies ThreadState);
-        reply = await this.agents.ask(sessionId, prompt, onOutput);
+        reply = await this.agents.ask(sessionId, prompt);
       }
     } catch (err) {
       if (this.active.get(member.agentId) === here) this.active.delete(member.agentId);
-      await settle();
-      await member.chat.patchPost(placeholder.id, `:warning: ${member.agentName} could not answer: ${String((err as Error)?.message ?? err).slice(0, 500)}`);
+      await member.chat.createPost(post.channel_id, rootId, `:warning: ${member.agentName} could not answer: ${String((err as Error)?.message ?? err).slice(0, 500)}`);
       return;
     }
 
     if (this.active.get(member.agentId) === here) this.active.delete(member.agentId);
-    await settle();
     const { text: body, choices } = extractChoices(reply ?? "");
     const origin = { channelId: post.channel_id, rootId, channelType: evt.channelType, channelName: evt.channelName };
     const buttons = choices.length && this.choiceButtons ? this.choiceButtons(origin, choices) : null;
     // Without buttons (no public URL set), the options stay readable as a list.
     const shown = choices.length && !buttons ? `${body}\n\n${choices.map((c, i) => `${i + 1}. ${c}`).join("\n")}` : body;
     const [first, ...more] = splitMessage(shown.trim() || `_${member.agentName} finished without a reply._`);
-    await member.chat.patchPost(placeholder.id, first);
+    await member.chat.createPost(post.channel_id, rootId, first);
     for (const part of more) await member.chat.createPost(post.channel_id, rootId, part);
     if (buttons) await member.chat.createPost(post.channel_id, rootId, "", buttons);
     if (outbox) {

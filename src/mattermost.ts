@@ -75,10 +75,6 @@ export class MattermostClient implements ChatApi {
     await this.request("POST", "/reactions", { user_id: this.botUserId, post_id: postId, emoji_name: emoji });
   }
 
-  async patchPost(postId: string, message: string): Promise<void> {
-    await this.request("PUT", `/posts/${postId}/patch`, { message });
-  }
-
   async typing(channelId: string, rootId: string): Promise<void> {
     await this.request("POST", "/users/me/typing", { channel_id: channelId, parent_id: rootId });
   }

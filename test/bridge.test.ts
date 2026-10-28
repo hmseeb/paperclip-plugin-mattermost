@@ -5,15 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { choiceProps, chosenProps, extractChoices, verifyChoice } from "../src/choices.ts";
 import { diskFiles, type Files } from "../src/files.ts";
-import { Progress } from "../src/progress.ts";
 import { Bridge, botUsername, mentions, splitMessage, stripMention, type Member, type PostedEvent, type Post } from "../src/bridge.ts";
 
 const MANAGER = "mgr";
 
-type Reply = (sessionId: string, prompt: string, onOutput?: (chunk: string) => void) => Promise<string | null>;
+type Reply = (sessionId: string, prompt: string) => Promise<string | null>;
 function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?: (userId: string, agentId: string) => Promise<boolean> } = {}) {
   const posts: { id: string; by: string; channelId: string; rootId: string; message: string; props?: Record<string, unknown> }[] = [];
-  const edits: string[] = [];
+  const typings: { at: number; channelId: string; rootId: string }[] = [];
   const notes: { userId: string; channelId: string; rootId: string; text: string }[] = [];
   const reactions: { by: string; postId: string; emoji: string }[] = [];
   const uploads: { by: string; rootId: string; message: string; files: { name: string; text: string }[] }[] = [];
@@ -27,8 +26,7 @@ function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?
     agentId, agentName, botUserId, username: botUsername(agentName),
     chat: {
       async createPost(channelId, rootId, message, props) { const id = `p${++n}`; posts.push({ id, by: botUserId, channelId, rootId, message, props }); return { id }; },
-      async patchPost(id, message) { edits.push(message); posts.find((p) => p.id === id)!.message = message; },
-      async typing() {},
+      async typing(channelId, rootId) { typings.push({ at: Date.now(), channelId, rootId }); },
       async react(postId, emoji) { reactions.push({ by: botUserId, postId, emoji }); },
       async download(id) { return { name: `${id}.txt`, data: new TextEncoder().encode(`contents of ${id}`) }; },
       async upload(_c, rootId, message, files) { uploads.push({ by: botUserId, rootId, message, files: files.map((f) => ({ name: f.name, text: new TextDecoder().decode(f.data) })) }); },
@@ -52,13 +50,13 @@ function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?
   };
   const agents = {
     async createSession(agentId: string, taskKey: string) { const id = `s${sessions.length + 1}`; sessions.push({ agentId, taskKey, id }); return id; },
-    async ask(sessionId: string, prompt: string, onOutput?: (chunk: string) => void) { prompts.push({ sessionId, prompt }); return opts.reply ? opts.reply(sessionId, prompt, onOutput) : `reply from ${sessionId}`; },
+    async ask(sessionId: string, prompt: string) { prompts.push({ sessionId, prompt }); return opts.reply ? opts.reply(sessionId, prompt) : `reply from ${sessionId}`; },
   };
   const store = { async get<T>(k: string) { return (state.get(k) ?? null) as T | null; }, async set(k: string, v: unknown) { state.set(k, v); } };
   const bridge = new Bridge(() => roster, directory, agents, store, () => {}, opts.files ?? null,
     opts.buttons ? (where, choices) => choiceProps("k", "https://pc/actions", where, choices) : null, opts.canTalk ?? null);
   const handle = (e: PostedEvent) => { humanPosts.push(e.post); return bridge.handle(e); };
-  return { handle, posts, edits, uploads, reactions, notes, sessions, prompts, joined, state };
+  return { handle, posts, typings, uploads, reactions, notes, sessions, prompts, joined, state };
 }
 
 let seq = 0;
@@ -195,38 +193,6 @@ test("the manager account's own posts are answered (it may be a person's admin t
   assert.equal(t.sessions.length, 1);
 });
 
-const acpx = (o: Record<string, unknown>) => JSON.stringify(o) + "\n";
-
-test("progress lists the agent's tool steps from ACPX output, split across chunks", () => {
-  const p = new Progress();
-  assert.equal(p.render(), "_thinking…_");
-  const call = acpx({ type: "acpx.tool_call", name: "Terminal", toolCallId: "t1", status: "pending", tag: "tool_call" });
-  assert.equal(p.feed(call.slice(0, 20)), false);
-  assert.equal(p.feed(call.slice(20)), true);
-  p.feed(acpx({ type: "acpx.tool_call", name: "ls -la /work", toolCallId: "t1", tag: "tool_call_update" }));
-  p.feed(acpx({ type: "acpx.tool_call", name: "Terminal", toolCallId: "t1", status: "completed", tag: "tool_call_update" })); // as seen live
-  p.feed(acpx({ type: "acpx.tool_call", name: "Read", toolCallId: "t2", status: "in_progress", tag: "tool_call" }));
-  assert.equal(p.feed(acpx({ type: "acpx.text_delta", text: "hi", tag: "agent_message_chunk" }) + "[paperclip] not json\n"), false);
-  assert.equal(p.render(), "_thinking…_\n- ✓ `ls -la /work`\n- … `Read`");
-  for (let i = 3; i < 12; i++) p.feed(acpx({ type: "acpx.tool_call", name: `step ${i}`, toolCallId: `t${i}`, status: "completed", tag: "tool_call" }));
-  assert.match(p.render(), /^_thinking…_\n- _5 earlier steps_\n/);
-  assert.equal(p.render().split("\n").length, 8);
-});
-
-test("the working post shows live steps, and the answer always replaces them", async () => {
-  const t = setup({ reply: async (_sid, _p, onOutput) => {
-    onOutput!(acpx({ type: "acpx.tool_call", name: "Terminal", toolCallId: "t1", status: "pending", tag: "tool_call" }));
-    await new Promise((r) => setTimeout(r, 2300));
-    onOutput!(acpx({ type: "acpx.tool_call", name: "git status", toolCallId: "t1", status: "completed", tag: "tool_call_update" }));
-    return "all done";
-  } });
-  await t.handle(evt("hi", { channelType: "D", channelName: "alice__bot-ceo" }));
-  assert.equal(t.posts.length, 1);
-  assert.match(t.edits[0], /- … `Terminal`/);
-  assert.equal(t.edits.at(-1), "all done");
-  await new Promise((r) => setTimeout(r, 2300)); // a progress edit still pending would land here
-  assert.equal(t.posts[0].message, "all done");
-});
 
 test("files: attachments are saved for the agent, and what it leaves in the outbox is posted back", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "mm-files-"));
@@ -314,4 +280,24 @@ test("access: a person limited to some agents reaches those and gets a note from
   assert.deepEqual(t.sessions.map((s) => s.agentId), ["a-csm"]);
   assert.equal(t.notes.length, 1);
   assert.match(t.notes[0].text, /talk to CTO/);
+});
+
+test("the bot shows 'is typing' until the answer is posted, with no placeholder message", async () => {
+  const t = setup({ reply: async () => { await new Promise((r) => setTimeout(r, 3500)); return "done"; } });
+  await t.handle(evt("hi", { id: "m1", channelType: "D", channelName: "alice__bot-ceo" }));
+  assert.deepEqual(t.posts.map((p) => p.message), ["done"]);
+  assert.ok(t.typings.length >= 2, `refreshed while working (${t.typings.length})`);
+  assert.ok(t.typings.every((x) => x.channelId === "c1" && (x.rootId === "m1" || x.rootId === "")));
+  assert.ok(t.typings.some((x) => x.rootId === "m1") && t.typings.some((x) => x.rootId === ""), "thread and channel");
+  const after = t.typings.length;
+  await new Promise((r) => setTimeout(r, 3500));
+  assert.equal(t.typings.length, after, "stops once answered");
+});
+
+test("old placeholder posts are left out of the thread history sent to the agent", async () => {
+  const t = setup();
+  await t.handle(evt("@ceo first", { id: "root" }));
+  t.posts.push({ id: "old", by: "bot-ceo", channelId: "c1", rootId: "root", message: "_thinking…_\n- ✓ `ls`" });
+  await t.handle(evt("second", { root_id: "root" }));
+  assert.doesNotMatch(t.prompts[1].prompt, /thinking…/);
 });

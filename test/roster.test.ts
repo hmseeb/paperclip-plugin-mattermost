@@ -60,7 +60,7 @@ function setup(mm: ReturnType<typeof fakeMattermost>, saved: Record<string, stri
   const store = new Map<string, unknown>([["bots", saved]]);
   const client = () => ({
     connected: true, async init() {}, connect() {}, close() {},
-    async createPost() { return { id: "p" }; }, async patchPost() {}, async typing() {}, async react() {},
+    async createPost() { return { id: "p" }; }, async typing() {}, async react() {},
     async download() { return { name: "", data: new Uint8Array() }; }, async upload() {},
   });
   const log: string[] = [];
