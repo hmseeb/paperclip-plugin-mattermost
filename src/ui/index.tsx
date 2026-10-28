@@ -156,6 +156,28 @@ function AccessList({ members, agents, grants, accounts, onChange }: { members: 
   );
 }
 
+/**
+ * Mattermost hides Personal Access Tokens until a System Admin switches them on, which is
+ * where most setups stall. Links go straight to the two settings when the URL is known.
+ */
+function TokenHelp({ mattermostUrl }: { mattermostUrl: string }) {
+  const base = /^https?:\/\/\S+/.test(mattermostUrl.trim()) ? mattermostUrl.trim().replace(/\/+$/, "") : null;
+  const page = (path: string, label: string) => (base ? <a href={`${base}${path}`} target="_blank" rel="noreferrer">{label}</a> : <b>{label}</b>);
+  return (
+    <details style={{ marginTop: 8 }}>
+      <summary style={{ cursor: "pointer", opacity: 0.9 }}>Don't see Personal Access Tokens?</summary>
+      <ol style={{ margin: "8px 0 0", paddingLeft: 20, lineHeight: 1.6 }}>
+        <li>Sign in to Mattermost as a System Admin.</li>
+        <li>System Console → Integrations → {page("/admin_console/integrations/integration_management", "Integration Management")}: set <b>Enable Personal Access Tokens</b> to true and save.</li>
+        <li>System Console → Integrations → {page("/admin_console/integrations/bot_accounts", "Bot Accounts")}: make sure <b>Enable Bot Account Creation</b> is true.</li>
+        <li>Back in Mattermost: Profile → Security → <b>Personal Access Tokens</b> → Create Token, and copy it.</li>
+        <li>In Paperclip: Settings → Secrets → add a secret with that token, then choose it above.</li>
+      </ol>
+      <div style={{ marginTop: 6 }}>Still missing after step 2? The account you are signed in with is not a System Admin.</div>
+    </details>
+  );
+}
+
 type FieldErrors = Partial<Record<"mattermostUrl" | "botToken" | "agents" | "access", string>>;
 
 function validate(c: Config): FieldErrors {
@@ -300,7 +322,10 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
         <input style={s.input} value={String(config.mattermostUrl ?? "")} onChange={(e) => set({ mattermostUrl: e.target.value })} placeholder="https://chat.example.com" />
       </Field>
 
-      <Field label="Mattermost admin token" error={fieldErrors.botToken} help="A Paperclip secret holding a personal access token of a Mattermost System Admin (Profile → Security → Personal Access Tokens). It creates one bot per agent and keeps them in sync.">
+      <Field label="Mattermost admin token" error={fieldErrors.botToken} help={<>
+        A Paperclip secret holding a personal access token of a Mattermost System Admin (Profile → Security → Personal Access Tokens). It creates one bot per agent and keeps them in sync.
+        <TokenHelp mattermostUrl={String(config.mattermostUrl ?? "")} />
+      </>}>
         <select style={s.input} value={token?.secretId ?? ""} onChange={(e) => set({ botToken: e.target.value ? { type: "secret_ref", version: "latest", secretId: e.target.value } : undefined })}>
           <option value="">Choose a secret…</option>
           {secrets.map((x) => <option key={x.id} value={x.id}>{x.name || x.key || x.id}</option>)}
