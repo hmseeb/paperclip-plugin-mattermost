@@ -123,8 +123,17 @@ class Tenant {
         await manager.request("PUT", `/posts/${postId}/patch`, { message, props: this.tag(props) });
       },
       async channel(name) {
-        for (const team of await manager.request<{ id: string }[]>("GET", "/users/me/teams")) {
-          try { return (await manager.request<{ id: string }>("GET", `/teams/${team.id}/channels/name/${encodeURIComponent(name.replace(/^[#~]/, ""))}`)).id; } catch { /* next team */ }
+        // By URL name ("decisions") or by display name in any case ("Decisions"),
+        // since a setting typed before Mattermost was connected is often the latter.
+        const wanted = name.replace(/^[#~]/, "").trim();
+        const teams = await manager.request<{ id: string }[]>("GET", "/users/me/teams");
+        for (const team of teams) {
+          try { return (await manager.request<{ id: string }>("GET", `/teams/${team.id}/channels/name/${encodeURIComponent(wanted.toLowerCase())}`)).id; } catch { /* not a URL name here */ }
+        }
+        for (const team of teams) {
+          const list = await manager.request<{ id: string; display_name: string }[]>("GET", `/teams/${team.id}/channels?per_page=200`).catch(() => []);
+          const hit = list.find((ch) => ch.display_name.trim().toLowerCase() === wanted.toLowerCase());
+          if (hit) return hit.id;
         }
         return null;
       },
@@ -268,6 +277,10 @@ async function saveBoot(companyId: string, config: Record<string, unknown>): Pro
 }
 
 const plugin = definePlugin({
+  // One worker serves every company, each with its own Mattermost (Tenant above).
+  // Without this Paperclip refuses a second company's settings as a cross-tenant risk.
+  multiCompanyConfig: true,
+
   async setup(c) {
     // No company-scoped calls here: the host denies them until the plugin is
     // configured for a company, so the install itself would fail. The host
