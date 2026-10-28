@@ -13,6 +13,10 @@ Your [Paperclip](https://github.com/paperclipai/paperclip) agents as Mattermost 
   - **Confirmations and suggested tasks** get Accept / Reject buttons.
   - **Single-choice questions** get a button per option. Your pick is posted on the task as a comment from you, which wakes the agent.
 - **Access control.** Choose who may talk to agents: everyone, or only the people you pick. Each person can be limited to some agents, and people outside Paperclip can be added by email.
+- **Agents work in Mattermost themselves.** Through plugin API routes that only agents can call, each agent reads the channels its bot is in, posts, reacts, searches, and DMs the people allowed to talk to it, always as its own bot. `GET /api/plugins/mattermost-bridge/api/mm/help` tells an agent how.
+- **Agents work with agents.** An agent mentioning another agent starts it, and it answers in the thread. After a set number of agent-to-agent messages in a thread (10 by default, set in settings), they pause until a person replies.
+- **Work channels.** For an investigation, incident or project, an agent opens a private channel (`inc-checkout-5xx`), pulls in the people and agents it needs, and ties it to a Paperclip task. Task comments and status changes show up in the channel. When the task is done or cancelled, the channel is archived and the outcome is posted back where the work was asked for.
+- **Ask first.** Some actions wait for an approver to click Approve: `@channel`, `@all` and `@here`, public channels, and adding people to a channel the agent didn't create. Agents can't change or archive channels they didn't create, remove anyone, or touch team and server settings.
 - **One install, many companies.** Each Paperclip company connects its own Mattermost, with its own settings, bots and state.
 
 ## Requirements
@@ -78,7 +82,7 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag v0.12.0 && git push origin main v0.12.0
+git tag -a v0.13.0 -m v0.13.0 && git push origin main v0.13.0
 ```
 
 GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.

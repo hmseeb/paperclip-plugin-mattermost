@@ -353,6 +353,11 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
         )}
       </Field>
 
+      <Field label="Agent-to-agent turns" help="Agents hand work to each other by mentioning one another in a thread. After this many agent messages in a row, they pause until a person replies.">
+        <input style={{ ...s.input, maxWidth: 120 }} type="number" min={1} max={100} value={String(config.agentTurnLimit ?? 10)}
+          onChange={(e) => set({ agentTurnLimit: Math.min(100, Math.max(1, Math.round(Number(e.target.value) || 10))) })} />
+      </Field>
+
       <Field label="Agents in Mattermost" error={fieldErrors.agents} help="Each agent shown here gets its own Mattermost bot. Unticking an agent switches its bot off but keeps it, with its history, for when you tick it again.">
         <Modes value={agentsMode} onChange={(v) => { setAgentsMode(v as "all" | "selected"); setSaved(false); }}
           options={[["all", "All agents (new agents join automatically)"], ["selected", "Only the agents I pick"]]} />

@@ -47,6 +47,10 @@ export class AgentBots {
     };
   }
 
+  all(): Member[] {
+    return [...this.members.values()];
+  }
+
   /** The Mattermost client of an agent's bot, for posts beyond chat replies. */
   clientOf(agentId: string): MattermostClient | undefined {
     return this.members.get(agentId)?.client as MattermostClient | undefined;

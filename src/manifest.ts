@@ -1,9 +1,11 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
+const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ routeKey, method, path, auth: "agent" as const, capability: "api.routes.register" as const });
+
 const manifest: PaperclipPluginManifestV1 = {
   id: "mattermost-bridge",
   apiVersion: 1,
-  version: "0.12.0",
+  version: "0.13.0",
   displayName: "Mattermost",
   description:
     "Every agent becomes its own Mattermost bot. DM an agent or mention it in a channel and it answers in the thread, showing its steps as it works; follow-ups continue the conversation. Paperclip approvals arrive with Approve / Reject buttons.",
@@ -29,10 +31,31 @@ const manifest: PaperclipPluginManifestV1 = {
     "issue.interactions.respond",
     "issue.comments.create",
     "issue.comments.create_human_attributed",
+    "issue.comments.read",
+    "api.routes.register",
   ],
   entrypoints: { worker: "./dist/worker.js", ui: "./dist/ui" },
   // Replaces the generated form: approvers picked from members, URL detected and checked.
   ui: { slots: [{ type: "settingsPage", id: "mattermost-settings", displayName: "Mattermost", exportName: "SettingsPage" }] },
+  // What agents do in Mattermost as their own bot (src/actions.ts). Agent-only: the host
+  // checks the caller is an agent and scopes it to that agent's company.
+  apiRoutes: [
+    route("help", "GET", "/mm/help"),
+    route("channels", "GET", "/mm/channels"),
+    route("channel-posts", "GET", "/mm/channels/:channel/posts"),
+    route("thread", "GET", "/mm/posts/:postId/thread"),
+    route("channel-members", "GET", "/mm/channels/:channel/members"),
+    route("search", "GET", "/mm/search"),
+    route("people", "GET", "/mm/people"),
+    route("request", "GET", "/mm/requests/:id"),
+    route("post", "POST", "/mm/post"),
+    route("react", "POST", "/mm/react"),
+    route("dm", "POST", "/mm/dm"),
+    route("create-channel", "POST", "/mm/channels"),
+    route("invite", "POST", "/mm/channels/:channel/invite"),
+    route("update-channel", "POST", "/mm/channels/:channel/update"),
+    route("archive", "POST", "/mm/channels/:channel/archive"),
+  ],
   webhooks: [
     { endpointKey: "actions", displayName: "Mattermost buttons", description: "Approve / Reject clicks on approval posts. Every click carries a signature the plugin checks." },
   ],
@@ -82,6 +105,14 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "People who can talk to agents",
         description: "Each person by email, with `agents` listing the agent ids they may talk to (absent: all agents). People outside Paperclip have no userId.",
         items: { type: "object", properties: { userId: { type: "string" }, email: { type: "string" }, name: { type: "string" }, agents: { type: "array", items: { type: "string" } } }, required: ["email"] },
+      },
+      agentTurnLimit: {
+        type: "integer",
+        minimum: 1,
+        maximum: 100,
+        default: 10,
+        title: "Agent-to-agent turns",
+        description: "How many messages agents may trade in one thread, mentioning each other, before a person must reply.",
       },
       approvers: {
         type: "array",

@@ -2,8 +2,12 @@ import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin
 import { createHmac } from "node:crypto";
 import { Cards } from "./interactions.ts";
 import { choiceProps, chosenProps, verifyChoice, type ChoiceContext } from "./choices.ts";
-import { Approvals, parseApprovers, type ActionRequest, type ApprovalPoster } from "./approvals.ts";
-import { Bridge, type Agents, type Directory, type PostedEvent, type Store } from "./bridge.ts";
+import { Approvals, parseApprovers, sign, signed, type ActionRequest, type ApprovalPoster } from "./approvals.ts";
+import { Actions, type PendingRequest } from "./actions.ts";
+import { WorkLinks, FROM_PAPERCLIP } from "./worklinks.ts";
+import { HELP } from "./help.ts";
+import { randomUUID } from "node:crypto";
+import { Bridge, DEFAULT_TURN_LIMIT, type Agents, type Directory, type PostedEvent, type Store } from "./bridge.ts";
 import { accessCheck } from "./access.ts";
 import { MattermostClient } from "./mattermost.ts";
 import { detached } from "./detach.ts";
@@ -51,7 +55,10 @@ class Tenant {
   bridge: Bridge | null = null;
   approvals: Approvals | null = null;
   cards: Cards | null = null;
+  actions: Actions | null = null;
+  work: WorkLinks | null = null;
   key = "";
+  private approvers = new Map<string, string>();
   private timers: ReturnType<typeof setInterval>[] = [];
 
   constructor(readonly companyId: string) {}
@@ -156,8 +163,10 @@ class Tenant {
     const actionUrl = `${paperclipUrl}/api/plugins/${PLUGIN_KEY}/webhooks/actions`;
     // Signs every button. Derived from the admin token: stable across restarts, and rotating the token voids old buttons.
     const key = createHmac("sha256", token).update("mattermost-approval-buttons").digest("hex");
+    const canTalk = accessCheck(manager, config);
     const bridge = new Bridge(() => roster.roster(), directoryOf(manager), this.agents(), store, warn, diskFiles(),
-      paperclipUrl ? (where, choices) => this.tag(choiceProps(key, actionUrl, where, choices)) : null, accessCheck(manager, config));
+      paperclipUrl ? (where, choices) => this.tag(choiceProps(key, actionUrl, where, choices)) : null, canTalk,
+      Number(config.agentTurnLimit) > 0 ? Number(config.agentTurnLimit) : DEFAULT_TURN_LIMIT);
     onPosted = (evt) => { void bridge.handle(evt); };
     const approvers = parseApprovers(config.approvers);
     const approvalsChannel = typeof config.approvalsChannel === "string" ? config.approvalsChannel.trim() : "";
@@ -176,7 +185,38 @@ class Tenant {
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
       agentName, store, actionUrl, key, paperclipUrl, channel: approvalsChannel, approvers,
     }) : null;
-    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, key });
+    const poster = this.poster(manager, roster);
+    const actions = new Actions({
+      bot: (agentId) => roster.clientOf(agentId),
+      manager,
+      agents: () => roster.all().map((m) => ({ agentId: m.agentId, agentName: m.agentName, username: m.username, botUserId: m.botUserId })),
+      canTalk: async (userId, agentId) => !canTalk || canTalk(userId, agentId),
+      origin: (agentId) => bridge.activeThread(agentId),
+      task: async (taskId) => (await ctx.issues.get(taskId, companyId)) as never,
+      askApproval: async (req) => {
+        if (!paperclipUrl || !approvers.size) throw Object.assign(new Error("this needs a person's approval, and nobody can approve from Mattermost yet (the plugin needs its Paperclip public URL and approvers set)"), { status: 403 });
+        const { message, props } = requestCard(req, actionUrl, key);
+        const targets = [req.origin, approvalsChannel ? await poster.channel(approvalsChannel).then((id) => id && id !== req.origin?.channelId ? { channelId: id, rootId: "" } : null) : null];
+        const postIds: string[] = [];
+        for (const where of targets) if (where) postIds.push(await poster.post(req.agentId, where, message, props));
+        await store.set(`reqcard:${req.id}`, postIds);
+      },
+      store, newId: () => randomUUID(),
+    });
+    const work = new WorkLinks({
+      store,
+      post: async (agentId, channelId, rootId, text) => {
+        const as = roster.clientOf(agentId) ?? manager;
+        await as.request("POST", "/posts", { channel_id: channelId, root_id: rootId, message: text, props: FROM_PAPERCLIP });
+      },
+      hasBot: (agentId) => Boolean(roster.clientOf(agentId)),
+      agentName: (agentId) => agentName(agentId),
+      archive: async (channelId) => { await manager.request("DELETE", `/channels/${channelId}`); },
+      channelName: async (channelId) => (await manager.request<{ display_name: string }>("GET", `/channels/${channelId}`)).display_name,
+      task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
+      comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId })),
+    });
+    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, key, approvers });
     this.status = `connecting to ${url} as @${manager.botUsername}`;
     // Everything below runs from Mattermost sockets and timers, outside this invocation.
     detached(() => {
@@ -198,7 +238,29 @@ class Tenant {
     this.timers = [];
     this.bots?.close();
     this.manager?.close();
-    Object.assign(this, { manager: null, bots: null, bridge: null, approvals: null, cards: null });
+    Object.assign(this, { manager: null, bots: null, bridge: null, approvals: null, cards: null, actions: null, work: null });
+  }
+
+  /** Approve / Reject on an agent's ask-first request (a broadcast, a public channel, an invite). */
+  private async decideRequest(req: ActionRequest & { channel_id?: string }): Promise<string | null> {
+    const { requestId, action, sig } = (req.context ?? {}) as { requestId?: string; action?: string; sig?: string };
+    if (!this.actions || !this.manager || !requestId || (action !== "approve" && action !== "reject") || !signed(this.key, `req:${requestId}`, action, sig)) return "This button is not valid.";
+    const email = req.user_id ? (await this.manager.request<{ email?: string }>("GET", `/users/${req.user_id}`).catch(() => ({ email: "" }))).email?.toLowerCase() : "";
+    if (!email || !this.approvers.has(email)) return "You are not set up to approve agent requests from Mattermost. Ask an admin to add your email to the plugin's approvers.";
+    const decided = await this.actions.decide(requestId, action === "approve", req.user_name ? `@${req.user_name}` : email);
+    if (!decided) return "That request is gone.";
+    const { message, props } = requestCard(decided, "", this.key);
+    const store = this.store();
+    for (const postId of (await store.get<string[]>(`reqcard:${requestId}`)) ?? []) {
+      await this.manager.request("PUT", `/posts/${postId}/patch`, { message, props }).catch(() => {});
+    }
+    return null;
+  }
+
+  /** An agent's call to one of the plugin's `/mm/...` routes. */
+  async api(agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+    if (!this.actions) return { status: 503, body: { error: `Mattermost is not connected for this company (${this.status})` } };
+    return this.actions.handle(agentId, routeKey, params, input);
   }
 
   private async notify(req: ActionRequest & { channel_id?: string }, notice: string | null): Promise<void> {
@@ -213,6 +275,10 @@ class Tenant {
     const failed = (err: unknown) => `Could not record that: ${errText(err).slice(0, 300)}`;
     if (kind === "card") {
       if (this.cards) await this.notify(req, await this.cards.click(req as never).catch(failed));
+      return;
+    }
+    if (kind === "request") {
+      await this.notify(req, await this.decideRequest(req).catch(failed));
       return;
     }
     if (kind === "choice") {
@@ -233,6 +299,27 @@ class Tenant {
     }
     if (this.approvals) await this.notify(req, await this.approvals.click(req).catch(failed));
   }
+}
+
+/** The Approve / Reject card for an agent's request; without buttons once decided. */
+function requestCard(r: PendingRequest, actionUrl: string, key: string): { message: string; props: Record<string, unknown> } {
+  const pending = r.status === "pending";
+  const button = (id: "approve" | "reject", name: string, style: string) => ({
+    id, name, style, type: "button",
+    integration: { url: actionUrl, context: { kind: "request", requestId: r.id, action: id, sig: sign(key, `req:${r.id}`, id) } },
+  });
+  const outcome = r.status === "approved" ? ":white_check_mark: Approved" : r.status === "rejected" ? ":x: Rejected" : ":warning: Approved, but it failed";
+  return {
+    message: `**${r.agentName}** asks to ${r.summary}`,
+    props: {
+      attachments: [{
+        color: pending ? "#f2a900" : r.status === "approved" ? "#3db887" : "#d24b4e",
+        text: `Needs approval because ${r.why}.`,
+        footer: pending ? "Approvers decide here" : `${outcome} by ${r.decidedBy}`,
+        actions: pending ? [button("approve", "Approve", "primary"), button("reject", "Reject", "danger")] : [],
+      }],
+    },
+  };
 }
 
 function directoryOf(manager: MattermostClient): Directory {
@@ -312,6 +399,11 @@ const plugin = definePlugin({
     ctx.actions.register("verify-url", async (params) => verifyUrl(String(params.url ?? ""), PLUGIN_KEY));
     const quietly = (what: string, fn: () => Promise<void>) => fn().catch((err) => ctx.logger.warn(what, { err: errText(err) }));
     ctx.events.on("approval.created", (e) => quietly("could not post approval", async () => { if (e.entityId) await tenants.get(e.companyId)?.approvals?.created(e.entityId); }));
+    ctx.events.on("issue.comment.created", (e) => quietly("could not mirror a task comment", async () => {
+      const commentId = (e.payload as { commentId?: string } | undefined)?.commentId;
+      if (e.entityId && commentId) await tenants.get(e.companyId)?.work?.comment(e.entityId, commentId);
+    }));
+    ctx.events.on("issue.updated", (e) => quietly("could not follow a task update", async () => { if (e.entityId) await tenants.get(e.companyId)?.work?.updated(e.entityId); }));
     ctx.events.on("approval.decided", (e) => quietly("could not update approval", async () => { if (e.entityId) await tenants.get(e.companyId)?.approvals?.decided(e.entityId); }));
     detached(() => void checkVersion().catch(() => {}));
     // After a crash the host restarts the worker without replaying config; normal
@@ -341,6 +433,18 @@ const plugin = definePlugin({
     // Buttons from before companies were stamped on them belong to the only company there was.
     const tenant = typeof companyId === "string" ? tenants.get(companyId) : tenants.size === 1 ? [...tenants.values()][0] : undefined;
     await tenant?.click(req);
+  },
+
+  async onApiRequest(input) {
+    const agentId = input.actor.agentId;
+    if (input.actor.actorType !== "agent" || !agentId) return { status: 403, body: { error: "Only agents call these routes." } };
+    if (input.routeKey === "help") return { status: 200, headers: { "content-type": "text/markdown; charset=utf-8" }, body: HELP };
+    const tenant = tenants.get(input.companyId);
+    if (!tenant) return { status: 503, body: { error: "Mattermost is not set up for your company." } };
+    const query = Object.fromEntries(Object.entries(input.query).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
+    const body = input.body && typeof input.body === "object" && !Array.isArray(input.body) ? (input.body as Record<string, unknown>) : {};
+    const res = await tenant.api(agentId, input.routeKey, input.params, { ...query, ...body });
+    return { status: res.status, body: res.body };
   },
 
   async onHealth() {

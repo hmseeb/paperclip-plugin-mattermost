@@ -78,7 +78,7 @@ export function sign(key: string, approvalId: string, action: string): string {
   return createHmac("sha256", key).update(`${approvalId}:${action}`).digest("hex");
 }
 
-function signed(key: string, approvalId: string, action: string, sig: unknown): boolean {
+export function signed(key: string, approvalId: string, action: string, sig: unknown): boolean {
   if (typeof sig !== "string") return false;
   const want = Buffer.from(sign(key, approvalId, action));
   const got = Buffer.from(sig);

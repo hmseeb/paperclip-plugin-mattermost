@@ -10,7 +10,7 @@ import { Bridge, botUsername, mentions, splitMessage, stripMention, type Member,
 const MANAGER = "mgr";
 
 type Reply = (sessionId: string, prompt: string) => Promise<string | null>;
-function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?: (userId: string, agentId: string) => Promise<boolean> } = {}) {
+function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?: (userId: string, agentId: string) => Promise<boolean>; turnLimit?: number } = {}) {
   const posts: { id: string; by: string; channelId: string; rootId: string; message: string; props?: Record<string, unknown> }[] = [];
   const typings: { at: number; channelId: string; rootId: string }[] = [];
   const notes: { userId: string; channelId: string; rootId: string; text: string }[] = [];
@@ -54,7 +54,7 @@ function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?
   };
   const store = { async get<T>(k: string) { return (state.get(k) ?? null) as T | null; }, async set(k: string, v: unknown) { state.set(k, v); } };
   const bridge = new Bridge(() => roster, directory, agents, store, () => {}, opts.files ?? null,
-    opts.buttons ? (where, choices) => choiceProps("k", "https://pc/actions", where, choices) : null, opts.canTalk ?? null);
+    opts.buttons ? (where, choices) => choiceProps("k", "https://pc/actions", where, choices) : null, opts.canTalk ?? null, opts.turnLimit);
   const handle = (e: PostedEvent) => { humanPosts.push(e.post); return bridge.handle(e); };
   return { handle, posts, typings, uploads, reactions, notes, sessions, prompts, joined, state };
 }
@@ -131,16 +131,27 @@ test("the same post arriving on several sockets is answered once", async () => {
   assert.equal(t.posts.length, 1);
 });
 
-test("ignores agent bots, other bots, webhooks and system posts", async () => {
+test("ignores other bots, webhooks, system posts, plugin task updates, and agents talking to no one", async () => {
   const t = setup();
-  await t.handle(evt("@ceo hi", { user_id: "bot-cto" }));
-  await t.handle(evt("@ceo hi", { props: { from_bot: "true" } }));
+  await t.handle(evt("@ceo hi", { props: { from_bot: "true" }, user_id: "some-other-bot" }));
   await t.handle(evt("@ceo hi", { props: { from_webhook: "true" } }));
   await t.handle(evt("@ceo hi", { type: "system_join_channel" }));
+  await t.handle(evt("@ceo hi", { user_id: "bot-cto", props: { from_bot: "true", from_paperclip: "true" } }));
+  await t.handle(evt("status update, no mention", { user_id: "bot-cto", props: { from_bot: "true" } }));
+  await t.handle(evt("@cto note to self", { user_id: "bot-cto", props: { from_bot: "true" } }));
   await t.handle(evt("hi", { channelType: "D", channelName: "alice__some-human" }));
   assert.equal(t.posts.length, 0);
+  assert.equal(t.sessions.length, 0);
 });
 
+test("an agent mentioning another agent starts it, which answers in the thread", async () => {
+  const t = setup();
+  await t.handle(evt("@ceo can you take a look?", { id: "m1", user_id: "bot-cto", props: { from_bot: "true" } }));
+  assert.deepEqual(t.sessions.map((x) => x.agentId), ["a-ceo"]);
+  assert.match(t.prompts[0].prompt, /\(@bot-cto, another agent\) wrote to you \(@ceo\)/);
+  assert.equal(t.posts[0].by, "bot-ceo");
+  assert.equal(t.posts[0].rootId, "m1");
+});
 test("a dead session is replaced and the message is retried once", async () => {
   const t = setup({ reply: async (sid) => { if (sid === "s1" && t.prompts.length === 2) throw new Error("session closed"); return `ok ${sid}`; } });
   await t.handle(evt("@ceo one", { id: "root" }));
@@ -300,4 +311,17 @@ test("old placeholder posts are left out of the thread history sent to the agent
   t.posts.push({ id: "old", by: "bot-ceo", channelId: "c1", rootId: "root", message: "_thinking…_\n- ✓ `ls`" });
   await t.handle(evt("second", { root_id: "root" }));
   assert.doesNotMatch(t.prompts[1].prompt, /thinking…/);
+});
+
+test("agents trading mentions pause at the turn limit until a person replies", async () => {
+  const t = setup({ turnLimit: 3 });
+  const agentPost = (n: number, from: string, to: string) => evt(`@${to} turn ${n}`, { id: `a${n}`, root_id: "root", user_id: from, props: { from_bot: "true" } });
+  await t.handle(evt("@ceo kick off", { id: "root" }));
+  for (let n = 1; n <= 5; n++) await t.handle(agentPost(n, n % 2 ? "bot-ceo" : "bot-cto", n % 2 ? "cto" : "ceo"));
+  assert.equal(t.prompts.length, 1 + 3, "three agent turns, then stop");
+  const notes = t.posts.filter((p) => /Pausing here/.test(p.message));
+  assert.equal(notes.length, 1, "the pause is announced once");
+  await t.handle(evt("go on", { root_id: "root", user_id: "alice" }));
+  await t.handle(agentPost(6, "bot-ceo", "cto"));
+  assert.equal(t.prompts.length, 1 + 3 + 1 + 1, "a person's reply resets the count");
 });
