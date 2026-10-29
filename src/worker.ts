@@ -266,8 +266,8 @@ class Tenant {
     return this.actions.handle(agentId, routeKey, params, input);
   }
 
-  /** The Agent computer plugin: an agent wants a person in its browser. Posted where the agent is working. */
-  async computerNeedsPerson(p: { agentId?: string; kind?: string; reason?: string; url?: string | null; path?: string | null; browser?: string | null }): Promise<void> {
+  /** The Agent computer plugin: an agent wants a person at its computer. Posted where the agent is working. */
+  async computerNeedsPerson(p: { agentId?: string; kind?: string; reason?: string; url?: string | null; path?: string | null; computer?: string | null; browser?: string | null }): Promise<void> {
     if (!this.manager || !this.bots || !this.bridge || !p.agentId) return;
     const poster = this.poster(this.manager, this.bots);
     const where = this.bridge.activeThread(p.agentId)
@@ -277,7 +277,7 @@ class Tenant {
     const on = p.url ? ` on ${p.url}` : "";
     const message = p.kind === "password"
       ? `:key: I ${p.reason ?? "need a password"}${on}. ${link ? `[Enter it here](${link})` : "Enter it from Computers in Paperclip"}: it goes straight into the page, and I never see it.`
-      : `:raising_hand: I need a person in ${p.browser ? `the shared ${p.browser} browser` : "my browser"}${on}: ${p.reason ?? "I am stuck"}. ${link ? `[Take over](${link})` : "Take over from Computers in Paperclip"}, then hand it back; I carry on as soon as you do.`;
+      : `:raising_hand: I need a person at ${(p.computer ?? p.browser) ? `the shared ${p.computer ?? p.browser} computer` : "my computer"}${on}: ${p.reason ?? "I am stuck"}. ${link ? `[Take over](${link})` : "Take over from Computers in Paperclip"}, then hand it back; I carry on as soon as you do.`;
     await poster.post(p.agentId, where, message, { ...FROM_PAPERCLIP });
   }
 

@@ -17,7 +17,7 @@ Your [Paperclip](https://github.com/paperclipai/paperclip) agents as Mattermost 
 - **Agents work with agents.** An agent mentioning another agent starts it, and it answers in the thread. After a set number of agent-to-agent messages in a thread (10 by default, set in settings), they pause until a person replies.
 - **Work channels.** For an investigation, incident or project, an agent opens a private channel (`inc-checkout-5xx`), pulls in the people and agents it needs, and ties it to a Paperclip task. Task comments and status changes show up in the channel. When the task is done or cancelled, the channel is archived and the outcome is posted back where the work was asked for.
 - **Ask first.** Some actions wait for an approver to click Approve: `@channel`, `@all` and `@here`, public channels, and adding people to a channel the agent didn't create. Agents can't change or archive channels they didn't create, remove anyone, or touch team and server settings.
-- **Agent computer requests.** With the Agent computer plugin installed, an agent that needs a person in its browser (a login, 2FA, a password) posts in the thread it is working in, or the approvals channel, with a link to take over.
+- **Agent computer requests.** With the Agent computer plugin installed, an agent that needs a person at its computer (a login, 2FA, a password) posts in the thread it is working in, or the approvals channel, with a link to take over.
 - **One install, many companies.** Each Paperclip company connects its own Mattermost, with its own settings, bots and state.
 
 ## Requirements
@@ -83,7 +83,7 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag -a v0.15.1 -m v0.15.1 && git push origin main v0.15.1
+git tag -a v0.15.2 -m v0.15.2 && git push origin main v0.15.2
 ```
 
 GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.
