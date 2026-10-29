@@ -83,7 +83,7 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag -a v0.15.0 -m v0.15.0 && git push origin main v0.15.0
+git tag -a v0.15.1 -m v0.15.1 && git push origin main v0.15.1
 ```
 
 GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.
