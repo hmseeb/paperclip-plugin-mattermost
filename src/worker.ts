@@ -59,6 +59,8 @@ class Tenant {
   work: WorkLinks | null = null;
   key = "";
   private approvers = new Map<string, string>();
+  private paperclipUrl = "";
+  private approvalsChannel = "";
   private timers: ReturnType<typeof setInterval>[] = [];
 
   constructor(readonly companyId: string) {}
@@ -216,7 +218,7 @@ class Tenant {
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
       comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId })),
     });
-    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, key, approvers });
+    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, key, approvers, paperclipUrl, approvalsChannel });
     this.status = `connecting to ${url} as @${manager.botUsername}`;
     // Everything below runs from Mattermost sockets and timers, outside this invocation.
     detached(() => {
@@ -262,6 +264,21 @@ class Tenant {
   async api(agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
     if (!this.actions) return { status: 503, body: { error: `Mattermost is not connected for this company (${this.status})` } };
     return this.actions.handle(agentId, routeKey, params, input);
+  }
+
+  /** The Agent computer plugin: an agent wants a person in its browser. Posted where the agent is working. */
+  async computerNeedsPerson(p: { agentId?: string; kind?: string; reason?: string; url?: string | null; path?: string | null }): Promise<void> {
+    if (!this.manager || !this.bots || !this.bridge || !p.agentId) return;
+    const poster = this.poster(this.manager, this.bots);
+    const where = this.bridge.activeThread(p.agentId)
+      ?? (this.approvalsChannel ? await poster.channel(this.approvalsChannel).then((id) => (id ? { channelId: id, rootId: "" } : null)) : null);
+    if (!where) return;
+    const link = this.paperclipUrl && p.path ? `${this.paperclipUrl}${p.path}` : null;
+    const on = p.url ? ` on ${p.url}` : "";
+    const message = p.kind === "password"
+      ? `:key: I ${p.reason ?? "need a password"}${on}. ${link ? `[Enter it here](${link})` : "Enter it from Computers in Paperclip"}: it goes straight into the page, and I never see it.`
+      : `:raising_hand: I need a person in my browser${on}: ${p.reason ?? "I am stuck"}. ${link ? `[Take over](${link})` : "Take over from Computers in Paperclip"}, then hand it back.`;
+    await poster.post(p.agentId, where, message, { ...FROM_PAPERCLIP });
   }
 
   private async notify(req: ActionRequest & { channel_id?: string }, notice: string | null): Promise<void> {
@@ -417,6 +434,9 @@ const plugin = definePlugin({
       if (e.entityId && commentId) await tenants.get(e.companyId)?.work?.comment(e.entityId, commentId);
     }));
     ctx.events.on("issue.updated", (e) => quietly("could not follow a task update", async () => { if (e.entityId) await tenants.get(e.companyId)?.work?.updated(e.entityId); }));
+    ctx.events.on("plugin.agent-computer.needs-person", (e) => quietly("could not post a computer help request", async () => {
+      await tenants.get(e.companyId)?.computerNeedsPerson((e.payload ?? {}) as never);
+    }));
     ctx.events.on("approval.decided", (e) => quietly("could not update approval", async () => { if (e.entityId) await tenants.get(e.companyId)?.approvals?.decided(e.entityId); }));
     detached(() => void checkVersion().catch(() => {}));
     // After a crash the host restarts the worker without replaying config; normal
