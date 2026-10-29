@@ -104,7 +104,7 @@ class Tenant {
     }));
   }
 
-  private store(): Store {
+  store(): Store {
     const key = (stateKey: string) => ({ scopeKind: "company" as const, scopeId: this.companyId, namespace: "mattermost", stateKey });
     return {
       get: async (k) => (await ctx.state.get(key(k))) as never,
@@ -199,6 +199,14 @@ class Tenant {
       agents: () => roster.all().map((m) => ({ agentId: m.agentId, agentName: m.agentName, username: m.username, botUserId: m.botUserId })),
       canTalk: async (userId, agentId) => !canTalk || canTalk(userId, agentId),
       origin: (agentId) => bridge.activeThread(agentId),
+      // The task this run works on (its execution or checkout run), and the thread it was asked for in.
+      taskThread: async (agentId, runId, channelId) => {
+        if (!runId) return null;
+        const issues = await ctx.issues.list({ companyId, assigneeAgentId: agentId, limit: 200 });
+        const issue = issues.find((i) => i.executionRunId === runId || i.checkoutRunId === runId);
+        const at = issue ? await store.get<{ channelId: string; rootId: string }>(`issuethread:${issue.id}`) : null;
+        return at && at.channelId === channelId ? at.rootId : null;
+      },
       task: async (taskId) => (await ctx.issues.get(taskId, companyId)) as never,
       askApproval: async (req) => {
         if (!paperclipUrl || !approvers.size) throw Object.assign(new Error("this needs a person's approval, and nobody can approve from Mattermost yet (the plugin needs its Paperclip public URL and approvers set)"), { status: 403 });
@@ -266,9 +274,9 @@ class Tenant {
   }
 
   /** An agent's call to one of the plugin's `/mm/...` routes. */
-  async api(agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  async api(agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>, runId: string | null = null): Promise<{ status: number; body: unknown }> {
     if (!this.actions) return { status: 503, body: { error: `Mattermost is not connected for this company (${this.status})` } };
-    return this.actions.handle(agentId, routeKey, params, input);
+    return this.actions.handle(agentId, routeKey, params, input, runId);
   }
 
   /** The Agent computer plugin: an agent wants a person at its computer. Posted where the agent is working. */
@@ -442,6 +450,16 @@ const plugin = definePlugin({
     ctx.events.on("plugin.agent-computer.needs-person", (e) => quietly("could not post a computer help request", async () => {
       await tenants.get(e.companyId)?.computerNeedsPerson((e.payload ?? {}) as never);
     }));
+    // A task an agent creates while answering in a Mattermost thread belongs to that conversation:
+    // its later results are threaded there (Actions' taskThread).
+    ctx.events.on("issue.created", (e) => quietly("could not link a task to its thread", async () => {
+      const tenant = tenants.get(e.companyId);
+      if (!tenant?.bridge || !e.entityId) return;
+      const issue = await ctx.issues.get(e.entityId, e.companyId);
+      const by = issue?.createdByAgentId;
+      const at = by ? tenant.bridge.activeThread(by) : null;
+      if (at) await tenant.store().set(`issuethread:${e.entityId}`, at);
+    }));
     ctx.events.on("approval.decided", (e) => quietly("could not update approval", async () => { if (e.entityId) await tenants.get(e.companyId)?.approvals?.decided(e.entityId); }));
     detached(() => void checkVersion().catch(() => {}));
     // After a crash the host restarts the worker without replaying config; normal
@@ -486,7 +504,7 @@ const plugin = definePlugin({
       const messages = tenant.bridge ? await tenant.bridge.takeInbox(agentId) : [];
       return { status: 200, body: { messages, note: messages.length ? "Written to you while you were working. Act on them now: they are not sent to you again." : "Nothing new." } };
     }
-    const res = await tenant.api(agentId, input.routeKey, input.params, { ...query, ...body });
+    const res = await tenant.api(agentId, input.routeKey, input.params, { ...query, ...body }, input.actor.runId ?? null);
     if (tenant.bridge?.hasInbox(agentId) && res.body && typeof res.body === "object" && !Array.isArray(res.body)) {
       res.body = { ...(res.body as object), newMessages: await tenant.bridge.takeInbox(agentId) };
     }

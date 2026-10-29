@@ -19,6 +19,11 @@ export interface ActionDeps {
   manager: MmClient;
   agents(): AgentRef[];
   canTalk(userId: string, agentId: string): Promise<boolean>;
+  /**
+   * The Mattermost thread a task this run works on was asked for in, when the run posts into that
+   * thread's channel without naming a thread: so a task's result lands in the conversation.
+   */
+  taskThread?(agentId: string, runId: string | null, channelId: string): Promise<string | null>;
   /** The thread the agent is answering right now, where results and requests are reported. */
   origin(agentId: string): { channelId: string; rootId: string } | null;
   /** A Paperclip task of this company, or null. */
@@ -65,7 +70,10 @@ export class Actions {
   }
 
   /** One route call. `params` are the route's path parameters, `input` its query or body. */
-  async handle(agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>): Promise<Result> {
+  private runId: string | null = null;
+
+  async handle(agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>, runId: string | null = null): Promise<Result> {
+    this.runId = runId;
     const bot = this.d.bot(agentId);
     if (!bot) return bad(409, "You have no Mattermost bot in this company yet (your agent may be switched off in the plugin's settings).");
     try {
@@ -198,7 +206,7 @@ export class Actions {
     const text = str(input.text);
     if (!text) return bad(400, "text is empty");
     const ch = await this.channel(bot, str(input.channel));
-    const threadId = str(input.threadId);
+    const threadId = str(input.threadId) || (await this.d.taskThread?.(agentId, this.runId, ch.id).catch(() => null)) || "";
     const waiting = await this.gate(agentId, canPost(text), "post", `post in ~${ch.name}: "${text.slice(0, 200)}"`, { channelId: ch.id, threadId, text });
     if (waiting) return waiting;
     return ok(await this.doPost(bot, ch.id, threadId, text));
@@ -224,7 +232,8 @@ export class Actions {
     const verdict = canDm(await this.d.canTalk(user.id, agentId));
     if (!verdict.ok) return bad(403, `Not allowed: ${verdict.why}.`);
     const channel = await bot.request<{ id: string }>("POST", "/channels/direct", [bot.botUserId, user.id]);
-    return ok(await this.doPost(bot, channel.id, "", text));
+    const threadId = str(input.threadId) || (await this.d.taskThread?.(agentId, this.runId, channel.id).catch(() => null)) || "";
+    return ok(await this.doPost(bot, channel.id, threadId, text));
   }
 
   // ---- channels ----------------------------------------------------------------------

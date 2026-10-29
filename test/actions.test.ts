@@ -58,6 +58,8 @@ function setup() {
     askApproval: async (r) => { asked.push(r); },
     store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
     newId: () => `r${asked.length + 1}`,
+    // run-42 works on a task asked for in thread root-x of channel CH
+    taskThread: async (_a, runId, channelId) => (runId === "run-42" && channelId === CH ? "root-x" : null),
   });
   return { mm, store, asked, actions };
 }
@@ -147,4 +149,14 @@ test("a work channel mirrors task comments and closes with the task", async () =
   await work.updated("issue-1");
   await work.comment("issue-1", "k1");
   assert.equal(archived.length, 1, "closed links stay closed");
+});
+
+test("a task's result, posted by its run without naming a thread, lands in the thread it was asked for in", async () => {
+  const t = setup();
+  await t.actions.handle("a-cto", "post", {}, { channel: "general", text: "BAD-1 is done" }, "run-42");
+  assert.equal((t.mm.calls.filter((c) => c.path === "/posts").at(-1)!.body as { root_id: string }).root_id, "root-x");
+  await t.actions.handle("a-cto", "post", {}, { channel: "general", text: "unrelated" }, "run-other");
+  assert.equal((t.mm.calls.filter((c) => c.path === "/posts").at(-1)!.body as { root_id: string }).root_id, "", "other runs post as before");
+  await t.actions.handle("a-cto", "post", {}, { channel: "general", text: "explicit", threadId: "chosen" }, "run-42");
+  assert.equal((t.mm.calls.filter((c) => c.path === "/posts").at(-1)!.body as { root_id: string }).root_id, "chosen", "a named thread wins");
 });
