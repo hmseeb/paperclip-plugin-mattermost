@@ -6,6 +6,7 @@ import type { WorkLink } from "./actions.ts";
 
 export const FROM_PAPERCLIP = { from_paperclip: "true" };
 const CLOSED = new Set(["done", "cancelled"]);
+const THREAD_REPORTS: Record<string, string> = { done: ":white_check_mark: Done:", cancelled: ":no_entry_sign: Cancelled:", blocked: ":pause_button: Blocked:" };
 const STATUS_WORDS: Record<string, string> = {
   todo: "to do", in_progress: "in progress", in_review: "in review", blocked: "blocked", backlog: "in the backlog", done: "done", cancelled: "cancelled",
 };
@@ -19,7 +20,7 @@ export interface WorkDeps {
   agentName(agentId: string): string;
   archive(channelId: string): Promise<void>;
   channelName(channelId: string): Promise<string>;
-  task(issueId: string): Promise<{ identifier?: string | null; title: string; status: string } | null>;
+  task(issueId: string): Promise<{ identifier?: string | null; title: string; status: string; assigneeAgentId?: string | null } | null>;
   comments(issueId: string): Promise<TaskComment[]>;
 }
 
@@ -52,6 +53,24 @@ export class WorkLinks {
     const own = c.authorAgentId && this.d.hasBot(c.authorAgentId);
     const text = own ? body : `**${c.authorAgentId ? this.d.agentName(c.authorAgentId) : "A team member"}** commented on ${this.label(hit.link)}:\n\n${body}`;
     await this.d.post(own ? c.authorAgentId! : hit.link.agentId, hit.channelId, "", text);
+  }
+
+  /**
+   * A task asked for in a Mattermost thread (created by the agent while answering there): when it is
+   * done, cancelled or blocked, its outcome (the last comment) is posted back in that thread, so the
+   * result always reaches the conversation it came from.
+   */
+  async threadUpdate(issueId: string): Promise<void> {
+    const at = await this.d.store.get<{ channelId: string; rootId: string; agentId?: string; status?: string }>(`issuethread:${issueId}`);
+    if (!at) return;
+    const task = await this.d.task(issueId);
+    if (!task || task.status === at.status || !THREAD_REPORTS[task.status]) return;
+    await this.d.store.set(`issuethread:${issueId}`, { ...at, status: task.status });
+    const last = (await this.d.comments(issueId)).at(-1)?.body?.trim();
+    const outcome = last ? `\n\n${last.length > 3000 ? last.slice(0, 3000) + "…" : last}` : "";
+    const by = [task.assigneeAgentId, at.agentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
+    if (!by) return;
+    await this.d.post(by, at.channelId, at.rootId, `${THREAD_REPORTS[task.status]} **${task.identifier ?? "The task"}** ${task.title}${outcome}`);
   }
 
   /** The task changed: note a new status; on done or cancelled, archive and report back. */

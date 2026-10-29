@@ -160,3 +160,27 @@ test("a task's result, posted by its run without naming a thread, lands in the t
   await t.actions.handle("a-cto", "post", {}, { channel: "general", text: "explicit", threadId: "chosen" }, "run-42");
   assert.equal((t.mm.calls.filter((c) => c.path === "/posts").at(-1)!.body as { root_id: string }).root_id, "chosen", "a named thread wins");
 });
+
+test("a task asked for in a thread reports back there when done, cancelled or blocked, once per status", async () => {
+  const store = new Map<string, unknown>([["issuethread:issue-9", { channelId: "dm", rootId: "root-q", agentId: "a-ceo", status: "todo" }]]);
+  const posts: { as: string; channelId: string; rootId: string; text: string }[] = [];
+  let status = "in_progress";
+  const work = new WorkLinks({
+    store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
+    post: async (as, channelId, rootId, text) => { posts.push({ as, channelId, rootId, text }); },
+    hasBot: (id) => id === "a-ceo" || id === "a-reporting",
+    agentName: (id) => id, archive: async () => {}, channelName: async () => "",
+    task: async () => ({ identifier: "BAD-728", title: "Client reporting batch", status, assigneeAgentId: "a-reporting" }),
+    comments: async () => [{ id: "k1", body: "Batch posted for approval: 12 receipts, 3 weekly reports.", authorAgentId: "a-reporting" }],
+  });
+  await work.threadUpdate("issue-9");
+  assert.equal(posts.length, 0, "in progress: nothing yet");
+  status = "done";
+  await work.threadUpdate("issue-9");
+  await work.threadUpdate("issue-9");
+  assert.equal(posts.length, 1, "once");
+  assert.deepEqual([posts[0].as, posts[0].channelId, posts[0].rootId], ["a-reporting", "dm", "root-q"]);
+  assert.match(posts[0].text, /^:white_check_mark: Done: \*\*BAD-728\*\* Client reporting batch\n\nBatch posted for approval/);
+  await work.threadUpdate("issue-unlinked");
+  assert.equal(posts.length, 1, "tasks not asked for in a thread are left alone");
+});

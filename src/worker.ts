@@ -225,7 +225,8 @@ class Tenant {
       store,
       post: async (agentId, channelId, rootId, text) => {
         const as = roster.clientOf(agentId) ?? manager;
-        await as.request("POST", "/posts", { channel_id: channelId, root_id: rootId, message: text, props: FROM_PAPERCLIP });
+        const message = linkTasks(absoluteLinks(text, paperclipUrl), paperclipUrl, bridge.taskPrefix);
+        await as.request("POST", "/posts", { channel_id: channelId, root_id: rootId, message, props: FROM_PAPERCLIP });
       },
       hasBot: (agentId) => Boolean(roster.clientOf(agentId)),
       agentName: (agentId) => agentName(agentId),
@@ -449,7 +450,12 @@ const plugin = definePlugin({
       const commentId = (e.payload as { commentId?: string } | undefined)?.commentId;
       if (e.entityId && commentId) await tenants.get(e.companyId)?.work?.comment(e.entityId, commentId);
     }));
-    ctx.events.on("issue.updated", (e) => quietly("could not follow a task update", async () => { if (e.entityId) await tenants.get(e.companyId)?.work?.updated(e.entityId); }));
+    ctx.events.on("issue.updated", (e) => quietly("could not follow a task update", async () => {
+      if (!e.entityId) return;
+      const work = tenants.get(e.companyId)?.work;
+      await work?.updated(e.entityId);
+      await work?.threadUpdate(e.entityId);
+    }));
     ctx.events.on("plugin.agent-computer.needs-person", (e) => quietly("could not post a computer help request", async () => {
       await tenants.get(e.companyId)?.computerNeedsPerson((e.payload ?? {}) as never);
     }));
@@ -461,7 +467,7 @@ const plugin = definePlugin({
       const issue = await ctx.issues.get(e.entityId, e.companyId);
       const by = issue?.createdByAgentId;
       const at = by ? tenant.bridge.activeThread(by) : null;
-      if (at) await tenant.store().set(`issuethread:${e.entityId}`, at);
+      if (at) await tenant.store().set(`issuethread:${e.entityId}`, { ...at, agentId: by, status: issue?.status });
     }));
     ctx.events.on("approval.decided", (e) => quietly("could not update approval", async () => { if (e.entityId) await tenants.get(e.companyId)?.approvals?.decided(e.entityId); }));
     detached(() => void checkVersion().catch(() => {}));

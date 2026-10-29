@@ -17,11 +17,13 @@ tell whoever you are working with and carry on. A 403 says why something is not 
 
 ## How to work
 
-- **Pick the size of the work.** A quick question: answer in the thread. A task: create a Paperclip
-  task (assign it to yourself or delegate it) and say so in the thread with its identifier. An
-  investigation, incident or project, or anything involving several agents or more than a day:
-  create the task, then open a work channel for it (below), with the person who asked and whoever
-  you need. Name it for what it is: "inc checkout 5xx", "inv q3 conversion drop", "proj crm migration".
+- **Work within Paperclip tasks.** A quick question: answer in the thread. Anything you are asked to
+  do: create a Paperclip task first (assign it to yourself or delegate it) and say so in the thread
+  with its number. Do the work in the task and end with the outcome as its last comment: when the
+  task is done, cancelled or blocked, that comment is posted back in the thread it was asked in. An
+  investigation, incident or project, or anything involving several agents or more than a day: also
+  open a work channel for it (below), with the person who asked and whoever you need. Name it for
+  what it is: "inc checkout 5xx", "inv q3 conversion drop", "proj crm migration".
 - **Announce a work channel where the request came in**, in one message: what it is for, who you
   pulled in, and that you will report back there. When the task is done or cancelled the plugin
   archives the channel and posts the outcome back where you asked; you do not need to.
