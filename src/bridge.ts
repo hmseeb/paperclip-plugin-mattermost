@@ -78,6 +78,12 @@ interface ThreadState {
   sessionId: string;
 }
 
+/** A reply being waited for, kept so a plugin restart can still deliver it (see `resume`). */
+interface InFlight { agentId: string; sessionId: string; channelId: string; channelType: string; channelName: string; at: number }
+const IN_FLIGHT = "inflight";
+const IN_FLIGHT_MAX_AGE = 3 * 60 * 60 * 1000;
+const RESUME_PROMPT = "The Mattermost plugin restarted while you were working on the conversation above, so your reply did not reach the thread. When you have finished, give your answer to the latest message again; it is posted in the thread.";
+
 export const DEFAULT_TURN_LIMIT = 10; // agent-to-agent messages in a thread before a person must reply
 export const TYPING_EVERY_MS = 3000; // Mattermost drops a typing indicator after ~5s
 /** The placeholder earlier versions posted while an agent worked; still in old threads. */
@@ -373,18 +379,22 @@ export class Bridge {
     this.active.set(member.agentId, here);
     try {
       let sessionId = thread && thread.agentId === member.agentId ? thread.sessionId : null;
+      const flight = (id: string) => this.inFlight(rootId, { agentId: member.agentId, sessionId: id, channelId: post.channel_id, channelType: evt.channelType, channelName: evt.channelName, at: Date.now() });
       try {
         if (!sessionId) throw new Error("no session yet");
+        await flight(sessionId);
         reply = await this.agents.ask(sessionId, prompt);
       } catch (first) {
         if (sessionId) this.log("session unusable, starting a new one", { sessionId, err: String(first) });
         sessionId = await this.agents.createSession(member.agentId, `mattermost:${rootId}`);
         await this.store.set(threadKey, { agentId: member.agentId, sessionId } satisfies ThreadState);
+        await flight(sessionId);
         reply = await this.agents.ask(sessionId, prompt);
       }
     } catch (err) {
       if (this.active.get(member.agentId) === here) this.active.delete(member.agentId);
       this.inbox.delete(member.agentId);
+      await this.inFlight(rootId, null);
       await member.chat.createPost(post.channel_id, rootId, `:warning: ${member.agentName} could not answer: ${String((err as Error)?.message ?? err).slice(0, 500)}`);
       return;
     }
@@ -392,8 +402,54 @@ export class Bridge {
     if (this.active.get(member.agentId) === here) this.active.delete(member.agentId);
     // Unread steering for this run goes back to being ordinary queued messages.
     this.inbox.delete(member.agentId);
+    await this.inFlight(rootId, null);
+    await this.postReply(member, { channelId: post.channel_id, rootId, channelType: evt.channelType, channelName: evt.channelName }, reply, outbox);
+  }
+
+  /** Records (or with null clears) the reply this thread is waiting for. */
+  private async inFlight(rootId: string, f: InFlight | null): Promise<void> {
+    const all = (await this.store.get<Record<string, InFlight>>(IN_FLIGHT)) ?? {};
+    if (f) all[rootId] = f; else delete all[rootId];
+    await this.store.set(IN_FLIGHT, all);
+  }
+
+  /**
+   * After a plugin restart: every reply that was being waited for is asked for again from the same
+   * agent session (which queues behind the run still going), and posted in its thread when it comes.
+   */
+  async resume(): Promise<number> {
+    const all = (await this.store.get<Record<string, InFlight>>(IN_FLIGHT)) ?? {};
+    let n = 0;
+    for (const [rootId, f] of Object.entries(all)) {
+      const member = this.roster().byAgentId(f.agentId);
+      if (!member || Date.now() - f.at > IN_FLIGHT_MAX_AGE) { await this.inFlight(rootId, null); continue; }
+      n++;
+      const prev = this.queues.get(rootId) ?? Promise.resolve();
+      const next = prev.then(async () => {
+        const typing = () => { void member.chat.typing(f.channelId, rootId).catch(() => {}); };
+        typing();
+        const timer = setInterval(typing, TYPING_EVERY_MS);
+        try {
+          const reply = await this.agents.ask(f.sessionId, RESUME_PROMPT);
+          await this.inFlight(rootId, null);
+          await this.postReply(member, { channelId: f.channelId, rootId, channelType: f.channelType, channelName: f.channelName }, reply, null);
+        } catch (err) {
+          await this.inFlight(rootId, null);
+          await member.chat.createPost(f.channelId, rootId, `:warning: ${member.agentName}'s reply was lost when the plugin restarted: ${String((err as Error)?.message ?? err).slice(0, 300)}. Ask again here.`).catch(() => {});
+        } finally {
+          clearInterval(timer);
+        }
+      }).catch((err) => this.log("resume failed", { err: String(err) }));
+      this.queues.set(rootId, next);
+      void next.finally(() => { if (this.queues.get(rootId) === next) this.queues.delete(rootId); });
+    }
+    return n;
+  }
+
+  private async postReply(member: Member, origin: { channelId: string; rootId: string; channelType: string; channelName: string }, reply: string | null, outbox: string | null): Promise<void> {
+    const post = { channel_id: origin.channelId };
+    const rootId = origin.rootId;
     const { text: body, choices } = extractChoices(linkTasks(absoluteLinks(reply ?? "", this.linkBase), this.linkBase, this.taskPrefix));
-    const origin = { channelId: post.channel_id, rootId, channelType: evt.channelType, channelName: evt.channelName };
     const buttons = choices.length && this.choiceButtons ? this.choiceButtons(origin, choices) : null;
     // Without buttons (no public URL set), the options stay readable as a list.
     const shown = choices.length && !buttons ? `${body}\n\n${choices.map((c, i) => `${i + 1}. ${c}`).join("\n")}` : body;

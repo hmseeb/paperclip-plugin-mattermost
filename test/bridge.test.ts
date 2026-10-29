@@ -378,3 +378,23 @@ test("the company's task numbers become links to Paperclip; look-alikes, code an
   assert.equal(linkTasks("```\nBAD-9\n```", base, "BAD"), "```\nBAD-9\n```");
   assert.equal(linkTasks("BAD-1", "", "BAD"), "BAD-1", "no Paperclip URL: left as text");
 });
+
+test("a reply interrupted by a plugin restart is asked for again and posted in its thread", async () => {
+  const t = setup({ reply: async () => { throw new Error("worker stopped"); } });
+  // A first worker, stopped mid-reply: what it was waiting for stays recorded.
+  t.state.set("inflight", { "root-r": { agentId: "a-cto", sessionId: "s9", channelId: "c1", channelType: "O", channelName: "general", at: Date.now() } });
+  const t2 = setup({ reply: async (_sid, prompt) => (prompt.includes("restarted") ? "Scan finished: 1,712 contacts to sync." : "x") });
+  for (const [k, v] of t.state) t2.state.set(k, v);
+  assert.equal(await t2.bridge.resume(), 1);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(t2.prompts.map((p) => p.sessionId), ["s9"], "the same session");
+  assert.equal(t2.posts.at(-1)!.message, "Scan finished: 1,712 contacts to sync.");
+  assert.equal(t2.posts.at(-1)!.rootId, "root-r");
+  assert.deepEqual(t2.state.get("inflight"), {}, "cleared once delivered");
+});
+
+test("a normal reply leaves nothing to resume", async () => {
+  const t = setup();
+  await t.handle(evt("@cto hi", { id: "q1" }));
+  assert.deepEqual(t.state.get("inflight"), {});
+});

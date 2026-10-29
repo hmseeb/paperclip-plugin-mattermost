@@ -243,7 +243,9 @@ class Tenant {
       const sync = () => roster.sync()
         .then(() => { this.status = `${roster.size} agent bots in sync`; })
         .catch((err) => { this.status = `agent bot sync failed: ${errText(err)}`; ctx.logger.error(this.status, { companyId }); });
-      void sync();
+      // Once the bots are connected: replies a restart interrupted are asked for again and delivered.
+      void sync().then(() => bridge.resume()).then((n) => { if (n) ctx.logger.info("resuming replies interrupted by a restart", { companyId, threads: n }); })
+        .catch((err) => warn("could not resume interrupted replies", { err: errText(err) }));
       this.timers.push(setInterval(sync, SYNC_EVERY_MS));
       void ensureSkill(companyId).catch((err) => warn("could not install the Mattermost skill", { err: errText(err) }));
       if (cards) {
