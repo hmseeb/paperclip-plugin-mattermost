@@ -110,6 +110,19 @@ export function absoluteLinks(text: string, base: string): string {
   return text.replace(/\]\((\/(?!\/)[^)\s]*)\)/g, (_m, path: string) => `](${root}${path})`);
 }
 
+/**
+ * The company's task numbers (BAD-728) as links to the task in Paperclip, when an agent writes them
+ * as plain text. Only this company's prefix, so COVID-19 or SHA-256 are left alone, and never inside
+ * code or an existing link.
+ */
+export function linkTasks(text: string, base: string, prefix: string): string {
+  if (!base || !/^[A-Z][A-Z0-9]{0,15}$/.test(prefix)) return text;
+  const root = base.replace(/\/+$/, "");
+  const skip = /(```[\s\S]*?```|`[^`\n]*`|\[[^\]]*\]\([^)]*\)|<[^>\s]+>|https?:\/\/[^\s)]+)/;
+  const id = new RegExp(`(?<![\\w/-])(${prefix}-\\d+)(?![\\w-])`, "g");
+  return text.split(skip).map((part, i) => (i % 2 ? part : part.replace(id, (m) => `[${m}](${root}/${prefix}/issues/${m})`))).join("");
+}
+
 export function splitMessage(text: string, max = MAX_POST): string[] {
   const parts: string[] = [];
   let rest = text;
@@ -136,8 +149,9 @@ export class Bridge {
   private choiceButtons: ChoiceButtons | null;
   private canTalk: ((userId: string, agentId: string) => Promise<boolean>) | null;
   private turnLimit: number;
-  /** Paperclip's public URL, for agents' relative links. */
+  /** Paperclip's public URL, for agents' relative links, and the company's task prefix (BAD). */
   linkBase = "";
+  taskPrefix = "";
   /**
    * Steering: messages people send in a thread while its agent is mid-run, kept for that agent to
    * read in the same run (`takeInbox`). One it read is not run again afterwards.
@@ -377,7 +391,7 @@ export class Bridge {
     if (this.active.get(member.agentId) === here) this.active.delete(member.agentId);
     // Unread steering for this run goes back to being ordinary queued messages.
     this.inbox.delete(member.agentId);
-    const { text: body, choices } = extractChoices(absoluteLinks(reply ?? "", this.linkBase));
+    const { text: body, choices } = extractChoices(linkTasks(absoluteLinks(reply ?? "", this.linkBase), this.linkBase, this.taskPrefix));
     const origin = { channelId: post.channel_id, rootId, channelType: evt.channelType, channelName: evt.channelName };
     const buttons = choices.length && this.choiceButtons ? this.choiceButtons(origin, choices) : null;
     // Without buttons (no public URL set), the options stay readable as a list.

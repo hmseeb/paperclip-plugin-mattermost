@@ -7,7 +7,7 @@ import { Actions, type PendingRequest } from "./actions.ts";
 import { WorkLinks, FROM_PAPERCLIP } from "./worklinks.ts";
 import { HELP } from "./help.ts";
 import { randomUUID } from "node:crypto";
-import { Bridge, DEFAULT_TURN_LIMIT, type Agents, type Directory, type PostedEvent, type Store } from "./bridge.ts";
+import { absoluteLinks, Bridge, DEFAULT_TURN_LIMIT, linkTasks, type Agents, type Directory, type PostedEvent, type Store } from "./bridge.ts";
 import { accessCheck } from "./access.ts";
 import { MattermostClient } from "./mattermost.ts";
 import { detached } from "./detach.ts";
@@ -171,6 +171,8 @@ class Tenant {
       Number(config.agentTurnLimit) > 0 ? Number(config.agentTurnLimit) : DEFAULT_TURN_LIMIT);
     onPosted = (evt) => { void bridge.handle(evt); };
     bridge.linkBase = paperclipUrl;
+    const company = await ctx.companies.get(companyId).catch(() => null);
+    bridge.taskPrefix = company?.issuePrefix ?? "";
     // A person wrote to a busy agent: the Agent computer plugin ends a computer wait so the agent reads it.
     bridge.onSteer = (agentId, postId) => {
       void ctx.events.emit("person-wrote", companyId, { agentId, postId }).catch(() => {});
@@ -199,6 +201,7 @@ class Tenant {
       agents: () => roster.all().map((m) => ({ agentId: m.agentId, agentName: m.agentName, username: m.username, botUserId: m.botUserId })),
       canTalk: async (userId, agentId) => !canTalk || canTalk(userId, agentId),
       origin: (agentId) => bridge.activeThread(agentId),
+      format: (text) => linkTasks(absoluteLinks(text, paperclipUrl), paperclipUrl, bridge.taskPrefix),
       // The task this run works on (its execution or checkout run), and the thread it was asked for in.
       taskThread: async (agentId, runId, channelId) => {
         if (!runId) return null;

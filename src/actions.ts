@@ -24,6 +24,8 @@ export interface ActionDeps {
    * thread's channel without naming a thread: so a task's result lands in the conversation.
    */
   taskThread?(agentId: string, runId: string | null, channelId: string): Promise<string | null>;
+  /** Agents' own posts and DMs as people should see them (Paperclip links made clickable). */
+  format?(text: string): string;
   /** The thread the agent is answering right now, where results and requests are reported. */
   origin(agentId: string): { channelId: string; rootId: string } | null;
   /** A Paperclip task of this company, or null. */
@@ -213,7 +215,7 @@ export class Actions {
   }
 
   async doPost(bot: MmClient, channelId: string, threadId: string, text: string) {
-    const p = await bot.request<Post>("POST", "/posts", { channel_id: channelId, root_id: threadId, message: text });
+    const p = await bot.request<Post>("POST", "/posts", { channel_id: channelId, root_id: threadId, message: this.d.format ? this.d.format(text) : text });
     return { posted: p.id, threadId: p.root_id || p.id };
   }
 

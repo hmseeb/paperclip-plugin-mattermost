@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { choiceProps, chosenProps, extractChoices, verifyChoice } from "../src/choices.ts";
 import { diskFiles, type Files } from "../src/files.ts";
-import { absoluteLinks, Bridge, botUsername, mentions, splitMessage, stripMention, type Member, type PostedEvent, type Post } from "../src/bridge.ts";
+import { absoluteLinks, Bridge, linkTasks, botUsername, mentions, splitMessage, stripMention, type Member, type PostedEvent, type Post } from "../src/bridge.ts";
 
 const MANAGER = "mgr";
 
@@ -366,4 +366,15 @@ test("steering the agent did not read still runs afterwards, as before", async (
   assert.equal(t.prompts.length, 2);
   assert.match(t.prompts[1].prompt, /also check X/);
   assert.equal(t.bridge.hasInbox("a-cto"), false);
+});
+
+test("the company's task numbers become links to Paperclip; look-alikes, code and links are left alone", () => {
+  const base = "https://os.badaaas.com";
+  assert.equal(linkTasks("Next steps on **BAD-728**: see BAD-705.", base, "BAD"),
+    "Next steps on **[BAD-728](https://os.badaaas.com/BAD/issues/BAD-728)**: see [BAD-705](https://os.badaaas.com/BAD/issues/BAD-705).");
+  assert.equal(linkTasks("COVID-19, SHA-256, XBAD-1, BAD-1x", base, "BAD"), "COVID-19, SHA-256, XBAD-1, BAD-1x");
+  assert.equal(linkTasks("`BAD-1` and [BAD-2](https://x/BAD-2) and https://os.badaaas.com/BAD/issues/BAD-3", base, "BAD"),
+    "`BAD-1` and [BAD-2](https://x/BAD-2) and https://os.badaaas.com/BAD/issues/BAD-3");
+  assert.equal(linkTasks("```\nBAD-9\n```", base, "BAD"), "```\nBAD-9\n```");
+  assert.equal(linkTasks("BAD-1", "", "BAD"), "BAD-1", "no Paperclip URL: left as text");
 });

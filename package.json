@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-mattermost",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "Paperclip agents in Mattermost: a bot per agent, live progress, files, approval and decision buttons, and per-person access, for each Paperclip company.",
   "type": "module",
   "license": "MIT",
