@@ -170,6 +170,11 @@ class Tenant {
       paperclipUrl ? (where, choices) => this.tag(choiceProps(key, actionUrl, where, choices)) : null, canTalk,
       Number(config.agentTurnLimit) > 0 ? Number(config.agentTurnLimit) : DEFAULT_TURN_LIMIT);
     onPosted = (evt) => { void bridge.handle(evt); };
+    bridge.linkBase = paperclipUrl;
+    // A person wrote to a busy agent: the Agent computer plugin ends a computer wait so the agent reads it.
+    bridge.onSteer = (agentId, postId) => {
+      void ctx.events.emit("person-wrote", companyId, { agentId, postId }).catch(() => {});
+    };
     const approvers = parseApprovers(config.approvers);
     const approvalsChannel = typeof config.approvalsChannel === "string" ? config.approvalsChannel.trim() : "";
     const agentName = (agentId: string | null) => (agentId && roster.roster().byAgentId(agentId)?.agentName) || "Paperclip";
@@ -476,7 +481,15 @@ const plugin = definePlugin({
     if (!tenant) return { status: 503, body: { error: "Mattermost is not set up for your company." } };
     const query = Object.fromEntries(Object.entries(input.query).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
     const body = input.body && typeof input.body === "object" && !Array.isArray(input.body) ? (input.body as Record<string, unknown>) : {};
+    // Steering: what people wrote in the agent's thread while it works, on request or with any answer.
+    if (input.routeKey === "inbox") {
+      const messages = tenant.bridge ? await tenant.bridge.takeInbox(agentId) : [];
+      return { status: 200, body: { messages, note: messages.length ? "Written to you while you were working. Act on them now: they are not sent to you again." : "Nothing new." } };
+    }
     const res = await tenant.api(agentId, input.routeKey, input.params, { ...query, ...body });
+    if (tenant.bridge?.hasInbox(agentId) && res.body && typeof res.body === "object" && !Array.isArray(res.body)) {
+      res.body = { ...(res.body as object), newMessages: await tenant.bridge.takeInbox(agentId) };
+    }
     return { status: res.status, body: res.body };
   },
 

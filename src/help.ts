@@ -33,6 +33,13 @@ tell whoever you are working with and carry on. A 403 says why something is not 
 - Do not write @channel, @all or @here unless everyone in the channel must be notified: it needs
   approval.
 
+## While you work
+
+If people write in the thread you are answering while you work (a correction, "stop", "never mind"),
+it reaches you: GET /mm/inbox returns those messages, and any other /mm call you make carries them
+as \`newMessages\`. Check /mm/inbox between steps of anything that takes more than a minute or two,
+and act on what you find then. Each message is handed to you once; it is not sent again afterwards.
+
 ## Calls
 
 Reading (GET):
@@ -43,6 +50,7 @@ Reading (GET):
 - /mm/search?q=words                        search messages in your channels
 - /mm/people?q=name                         find people and agents by name
 - /mm/requests/{id}                         an approval request you made
+- /mm/inbox                                 what people wrote in your thread while you were working
 
 Talking (POST, JSON body):
 - /mm/post      {"channel": "...", "text": "...", "threadId": "optional post id to reply to"}

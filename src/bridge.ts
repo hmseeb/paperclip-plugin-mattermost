@@ -100,6 +100,16 @@ export function stripMention(text: string, username: string): string {
   return text.replace(new RegExp(`(^|[^\\w@])@${username.replace(/[.-]/g, "\\$&")}\\b[:,]?`, "gi"), "$1").replace(/\s{2,}/g, " ").trim();
 }
 
+/**
+ * Paperclip-relative links an agent writes (`[BAD-705](/BAD/issues/BAD-705)`) made absolute, so a
+ * click in Mattermost opens Paperclip rather than a page on Mattermost's own domain.
+ */
+export function absoluteLinks(text: string, base: string): string {
+  if (!base) return text;
+  const root = base.replace(/\/+$/, "");
+  return text.replace(/\]\((\/(?!\/)[^)\s]*)\)/g, (_m, path: string) => `](${root}${path})`);
+}
+
 export function splitMessage(text: string, max = MAX_POST): string[] {
   const parts: string[] = [];
   let rest = text;
@@ -126,6 +136,16 @@ export class Bridge {
   private choiceButtons: ChoiceButtons | null;
   private canTalk: ((userId: string, agentId: string) => Promise<boolean>) | null;
   private turnLimit: number;
+  /** Paperclip's public URL, for agents' relative links. */
+  linkBase = "";
+  /**
+   * Steering: messages people send in a thread while its agent is mid-run, kept for that agent to
+   * read in the same run (`takeInbox`). One it read is not run again afterwards.
+   */
+  private inbox = new Map<string, { id: string; rootId: string; userId: string; text: string; at: number }[]>();
+  private delivered = new Set<string>();
+  /** Told when a person writes to an agent that is busy (the computer plugin wakes a waiting agent). */
+  onSteer: ((agentId: string, postId: string) => void) | null = null;
 
   constructor(roster: () => Roster, directory: Directory, agents: Agents, store: Store,
     log: (msg: string, meta?: Record<string, unknown>) => void = () => {}, files: Files | null = null,
@@ -152,11 +172,45 @@ export class Bridge {
     if (this.seen.size > 5000) this.seen.delete(this.seen.values().next().value as string);
 
     const rootId = evt.post.root_id || evt.post.id;
+    this.steer(evt, rootId);
     const prev = this.queues.get(rootId) ?? Promise.resolve();
     const next = prev.then(() => this.process(evt, rootId)).catch((err) => this.log("bridge error", { err: String(err) }));
     this.queues.set(rootId, next);
     void next.finally(() => { if (this.queues.get(rootId) === next) this.queues.delete(rootId); });
     return next;
+  }
+
+  /** A person writing in a thread whose agent is mid-run: offered to that run as well as queued. */
+  private steer(evt: PostedEvent, rootId: string) {
+    const { post } = evt;
+    if (!post.root_id || post.type || post.props?.from_webhook === "true" || post.props?.from_paperclip === "true" || post.props?.from_bot === "true") return;
+    if (this.roster().isBot(post.user_id) || !post.message?.trim()) return;
+    for (const [agentId, at] of this.active) {
+      if (at.rootId !== rootId) continue;
+      const list = this.inbox.get(agentId) ?? [];
+      list.push({ id: post.id, rootId, userId: post.user_id, text: post.message.slice(0, 4000), at: Date.now() });
+      this.inbox.set(agentId, list.slice(-20));
+      this.onSteer?.(agentId, post.id);
+    }
+  }
+
+  /** Whether the agent has unread messages from people in the thread it is answering. */
+  hasInbox(agentId: string): boolean {
+    return (this.inbox.get(agentId)?.length ?? 0) > 0;
+  }
+
+  /** What people wrote in the agent's thread since its run started; each is handed over once. */
+  async takeInbox(agentId: string): Promise<{ from: string; text: string; at: string }[]> {
+    const list = this.inbox.get(agentId) ?? [];
+    this.inbox.delete(agentId);
+    const out = [];
+    for (const m of list) {
+      this.delivered.add(m.id);
+      const who = await this.directory.userName(m.userId).catch(() => ({ username: m.userId, displayName: m.userId }));
+      out.push({ from: `${who.displayName} (@${who.username})`, text: m.text, at: new Date(m.at).toISOString() });
+    }
+    if (this.delivered.size > 2000) this.delivered.delete(this.delivered.values().next().value as string);
+    return out;
   }
 
   /** The thread an agent is answering right now, for posts its run causes (approvals). */
@@ -244,6 +298,11 @@ export class Bridge {
       if (!fromAgent && post.root_id) await this.resetTurns(rootId); // a person spoke in the thread
       return;
     }
+    if (this.delivered.has(post.id)) {
+      // Read and handled by the agent in the run that was going when it arrived.
+      await member.chat.react(post.id, "white_check_mark").catch(() => {});
+      return;
+    }
     if (!(await this.allowAgentTurn(rootId, fromAgent, member, post.channel_id))) return;
     const text = stripMention(post.message, member.username);
     const fileIds = this.files ? post.file_ids ?? [] : [];
@@ -288,7 +347,8 @@ export class Bridge {
     const fromAgent = this.roster().isBot(post.user_id);
     const prompt = `${sender.displayName} (@${sender.username}${fromAgent ? ", another agent" : ""}) wrote to you (@${member.username}) in ${where} on Mattermost. Your reply is posted back there, so answer in Markdown. ` +
       `To offer choices, end your reply with one line \`choices: First | Second\` (2 to ${MAX_CHOICES} short options); they are shown as buttons, and the pick comes back as the next message. ` +
-      `You can also read channels, post, message people, mention other agents and open work channels in Mattermost: GET <your Paperclip API URL>/api/plugins/mattermost-bridge/api/mm/help shows how.` +
+      `You can also read channels, post, message people, mention other agents and open work channels in Mattermost: GET <your Paperclip API URL>/api/plugins/mattermost-bridge/api/mm/help shows how. ` +
+      `If this takes more than a minute or two, check GET …/api/plugins/mattermost-bridge/api/mm/inbox between steps: it returns anything people write in this thread meanwhile (a correction, "stop", "never mind"); act on it then, as it is not sent to you again.` +
       (history ? `\n\nEarlier in this thread (oldest first):\n${history}\n\nNew message:` : "") + `\n\n${text || "(no text, only files)"}` +
       (attached.length ? `\n\nAttached files, saved on disk (read them at these paths):\n${attached.join("\n")}` : "") +
       (outbox ? `\n\nTo send files back with your reply, save them in ${outbox}` : "");
@@ -309,12 +369,15 @@ export class Bridge {
       }
     } catch (err) {
       if (this.active.get(member.agentId) === here) this.active.delete(member.agentId);
+      this.inbox.delete(member.agentId);
       await member.chat.createPost(post.channel_id, rootId, `:warning: ${member.agentName} could not answer: ${String((err as Error)?.message ?? err).slice(0, 500)}`);
       return;
     }
 
     if (this.active.get(member.agentId) === here) this.active.delete(member.agentId);
-    const { text: body, choices } = extractChoices(reply ?? "");
+    // Unread steering for this run goes back to being ordinary queued messages.
+    this.inbox.delete(member.agentId);
+    const { text: body, choices } = extractChoices(absoluteLinks(reply ?? "", this.linkBase));
     const origin = { channelId: post.channel_id, rootId, channelType: evt.channelType, channelName: evt.channelName };
     const buttons = choices.length && this.choiceButtons ? this.choiceButtons(origin, choices) : null;
     // Without buttons (no public URL set), the options stay readable as a list.

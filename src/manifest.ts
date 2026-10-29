@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "mattermost-bridge",
   apiVersion: 1,
-  version: "0.15.2",
+  version: "0.16.0",
   displayName: "Mattermost",
   description:
     "Every agent becomes its own Mattermost bot. DM an agent or mention it in a channel and it answers in the thread, showing its steps as it works; follow-ups continue the conversation. Paperclip approvals arrive with Approve / Reject buttons.",
@@ -23,6 +23,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "plugin.state.write",
     "http.outbound",
     "events.subscribe",
+    "events.emit",
     "webhooks.receive",
     "approvals.read",
     "approvals.respond",
@@ -43,6 +44,7 @@ const manifest: PaperclipPluginManifestV1 = {
   // checks the caller is an agent and scopes it to that agent's company.
   apiRoutes: [
     route("help", "GET", "/mm/help"),
+    route("inbox", "GET", "/mm/inbox"),
     route("channels", "GET", "/mm/channels"),
     route("channel-posts", "GET", "/mm/channels/:channel/posts"),
     route("thread", "GET", "/mm/posts/:postId/thread"),

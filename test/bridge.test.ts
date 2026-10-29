@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { choiceProps, chosenProps, extractChoices, verifyChoice } from "../src/choices.ts";
 import { diskFiles, type Files } from "../src/files.ts";
-import { Bridge, botUsername, mentions, splitMessage, stripMention, type Member, type PostedEvent, type Post } from "../src/bridge.ts";
+import { absoluteLinks, Bridge, botUsername, mentions, splitMessage, stripMention, type Member, type PostedEvent, type Post } from "../src/bridge.ts";
 
 const MANAGER = "mgr";
 
@@ -56,7 +56,7 @@ function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?
   const bridge = new Bridge(() => roster, directory, agents, store, () => {}, opts.files ?? null,
     opts.buttons ? (where, choices) => choiceProps("k", "https://pc/actions", where, choices) : null, opts.canTalk ?? null, opts.turnLimit);
   const handle = (e: PostedEvent) => { humanPosts.push(e.post); return bridge.handle(e); };
-  return { handle, posts, typings, uploads, reactions, notes, sessions, prompts, joined, state };
+  return { handle, posts, typings, uploads, reactions, notes, sessions, prompts, joined, state, bridge };
 }
 
 let seq = 0;
@@ -324,4 +324,46 @@ test("agents trading mentions pause at the turn limit until a person replies", a
   await t.handle(evt("go on", { root_id: "root", user_id: "alice" }));
   await t.handle(agentPost(6, "bot-ceo", "cto"));
   assert.equal(t.prompts.length, 1 + 3 + 1 + 1, "a person's reply resets the count");
+});
+
+test("an agent's Paperclip-relative links open Paperclip, not Mattermost", () => {
+  assert.equal(absoluteLinks("I opened [BAD-705](/BAD/issues/BAD-705) and [docs](https://x.dev/a).", "https://os.badaaas.com/"),
+    "I opened [BAD-705](https://os.badaaas.com/BAD/issues/BAD-705) and [docs](https://x.dev/a).");
+  assert.equal(absoluteLinks("[x](/a)", ""), "[x](/a)", "no Paperclip URL set: left alone");
+  assert.equal(absoluteLinks("[x](//cdn.example/a)", "https://p"), "[x](//cdn.example/a)");
+});
+
+test("steering: a message sent while the agent works reaches that run, and is not run again", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let inRun: { from: string; text: string }[] = [];
+  const t = setup({ reply: async (sid, prompt) => {
+    if (prompt.includes("long job")) { await gate; inRun = await t.bridge.takeInbox("a-cto"); return "Stopped, as you asked."; }
+    return `reply from ${sid}`;
+  } });
+  const first = t.handle(evt("@cto do the long job", { id: "root" }));
+  await new Promise((r) => setTimeout(r, 20));
+  const second = t.handle(evt("never mind, stop", { id: "m2", root_id: "root" }));
+  assert.equal(t.bridge.hasInbox("a-cto"), true);
+  release();
+  await first; await second;
+  assert.deepEqual(inRun.map((m) => m.text), ["never mind, stop"]);
+  assert.match(inRun[0].from, /@alice/);
+  assert.equal(t.prompts.length, 1, "the steering message did not start a second turn");
+  assert.ok(t.reactions.some((r) => r.postId === "m2" && r.emoji === "white_check_mark"), "marked as handled");
+  assert.match(t.prompts[0].prompt, /mm\/inbox/);
+});
+
+test("steering the agent did not read still runs afterwards, as before", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const t = setup({ reply: async (sid, prompt) => { if (prompt.includes("long job")) await gate; return `reply from ${sid}`; } });
+  const first = t.handle(evt("@cto do the long job", { id: "root2" }));
+  await new Promise((r) => setTimeout(r, 20));
+  const second = t.handle(evt("also check X", { id: "m3", root_id: "root2" }));
+  release();
+  await first; await second;
+  assert.equal(t.prompts.length, 2);
+  assert.match(t.prompts[1].prompt, /also check X/);
+  assert.equal(t.bridge.hasInbox("a-cto"), false);
 });
