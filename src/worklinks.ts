@@ -28,6 +28,8 @@ type Linked = WorkLink & { status?: string; closed?: boolean };
 
 export class WorkLinks {
   private d: WorkDeps;
+  /** One task's updates, one at a time: Paperclip sends several at once and each would report the change. */
+  private queue = new Map<string, Promise<unknown>>();
 
   constructor(deps: WorkDeps) {
     this.d = deps;
@@ -58,12 +60,23 @@ export class WorkLinks {
     await this.d.post(hit.link.agentId, hit.channelId, "", c.authorAgentId === hit.link.agentId ? body : quoted);
   }
 
+  private serial(key: string, run: () => Promise<void>): Promise<void> {
+    const next = (this.queue.get(key) ?? Promise.resolve()).catch(() => {}).then(run);
+    this.queue.set(key, next);
+    void next.catch(() => {}).finally(() => { if (this.queue.get(key) === next) this.queue.delete(key); });
+    return next;
+  }
+
   /**
    * A task asked for in a Mattermost thread (created by the agent while answering there): when it is
    * done, cancelled or blocked, its outcome (the last comment) is posted back in that thread, so the
    * result always reaches the conversation it came from.
    */
-  async threadUpdate(issueId: string): Promise<void> {
+  threadUpdate(issueId: string): Promise<void> {
+    return this.serial(`thread:${issueId}`, () => this.reportToThread(issueId));
+  }
+
+  private async reportToThread(issueId: string): Promise<void> {
     const at = await this.d.store.get<{ channelId: string; rootId: string; agentId?: string; status?: string }>(`issuethread:${issueId}`);
     if (!at) return;
     const task = await this.d.task(issueId);
@@ -84,7 +97,11 @@ export class WorkLinks {
   }
 
   /** The task changed: note a new status; on done or cancelled, archive and report back. */
-  async updated(issueId: string): Promise<void> {
+  updated(issueId: string): Promise<void> {
+    return this.serial(`link:${issueId}`, () => this.followLink(issueId));
+  }
+
+  private async followLink(issueId: string): Promise<void> {
     const hit = await this.linked(issueId);
     if (!hit) return;
     const task = await this.d.task(issueId);

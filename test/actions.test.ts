@@ -202,3 +202,17 @@ test("a result Mattermost refuses is not marked reported, so the next update tri
   await work.threadUpdate("issue-9");
   assert.equal(posts.length, 1);
 });
+
+test("two updates of one task arriving together report it once", async () => {
+  const store = new Map<string, unknown>([["issuethread:issue-9", { channelId: "dm", rootId: "root-q", agentId: "a-cto", status: "in_progress" }]]);
+  const posts: string[] = [];
+  const work = new WorkLinks({
+    store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
+    post: async (_as, _c, _r, text) => { posts.push(text); },
+    hasBot: () => true, agentName: (id) => id, archive: async () => {}, channelName: async () => "",
+    task: async () => { await new Promise((r) => setTimeout(r, 5)); return { identifier: "BAD-798", title: "T", status: "blocked", assigneeAgentId: "a-cto" }; },
+    comments: async () => [],
+  });
+  await Promise.all([work.threadUpdate("issue-9"), work.threadUpdate("issue-9")]);
+  assert.equal(posts.length, 1);
+});
