@@ -179,8 +179,26 @@ test("a task asked for in a thread reports back there when done, cancelled or bl
   await work.threadUpdate("issue-9");
   await work.threadUpdate("issue-9");
   assert.equal(posts.length, 1, "once");
-  assert.deepEqual([posts[0].as, posts[0].channelId, posts[0].rootId], ["a-reporting", "dm", "root-q"]);
-  assert.match(posts[0].text, /^:white_check_mark: Done: \*\*BAD-728\*\* Client reporting batch\n\nBatch posted for approval/);
+  // Posted by the agent the DM is with (the assignee's bot is not in it), naming who did the work.
+  assert.deepEqual([posts[0].as, posts[0].channelId, posts[0].rootId], ["a-ceo", "dm", "root-q"]);
+  assert.match(posts[0].text, /^:white_check_mark: Done: \*\*BAD-728\*\* Client reporting batch _\(by a-reporting\)_\n\nBatch posted for approval/);
   await work.threadUpdate("issue-unlinked");
   assert.equal(posts.length, 1, "tasks not asked for in a thread are left alone");
+});
+
+test("a result Mattermost refuses is not marked reported, so the next update tries again", async () => {
+  const store = new Map<string, unknown>([["issuethread:issue-9", { channelId: "dm", rootId: "root-q", agentId: "a-ceo", status: "todo" }]]);
+  let fail = true;
+  const posts: string[] = [];
+  const work = new WorkLinks({
+    store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
+    post: async (_as, _c, _r, text) => { if (fail) throw new Error("403"); posts.push(text); },
+    hasBot: () => true, agentName: (id) => id, archive: async () => {}, channelName: async () => "",
+    task: async () => ({ identifier: "BAD-1", title: "T", status: "done", assigneeAgentId: "a-ceo" }),
+    comments: async () => [],
+  });
+  await assert.rejects(work.threadUpdate("issue-9"));
+  fail = false;
+  await work.threadUpdate("issue-9");
+  assert.equal(posts.length, 1);
 });

@@ -50,9 +50,12 @@ export class WorkLinks {
     const c = (await this.d.comments(issueId)).find((x) => x.id === commentId);
     if (!c?.body?.trim()) return;
     const body = c.body.trim().slice(0, 12000);
-    const own = c.authorAgentId && this.d.hasBot(c.authorAgentId);
-    const text = own ? body : `**${c.authorAgentId ? this.d.agentName(c.authorAgentId) : "A team member"}** commented on ${this.label(hit.link)}:\n\n${body}`;
-    await this.d.post(own ? c.authorAgentId! : hit.link.agentId, hit.channelId, "", text);
+    const quoted = `**${c.authorAgentId ? this.d.agentName(c.authorAgentId) : "A team member"}** commented on ${this.label(hit.link)}:\n\n${body}`;
+    if (c.authorAgentId && c.authorAgentId !== hit.link.agentId && this.d.hasBot(c.authorAgentId)) {
+      // As its own bot when it is in the channel; Mattermost refuses one that is not, so then quoted.
+      try { return await this.d.post(c.authorAgentId, hit.channelId, "", body); } catch { /* not a member */ }
+    }
+    await this.d.post(hit.link.agentId, hit.channelId, "", c.authorAgentId === hit.link.agentId ? body : quoted);
   }
 
   /**
@@ -65,12 +68,19 @@ export class WorkLinks {
     if (!at) return;
     const task = await this.d.task(issueId);
     if (!task || task.status === at.status || !THREAD_REPORTS[task.status]) return;
+    // The agent the thread is with posts: another agent's bot is not in that DM or channel (403).
+    const by = [at.agentId, task.assigneeAgentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
+    if (!by) return;
     await this.d.store.set(`issuethread:${issueId}`, { ...at, status: task.status });
     const last = (await this.d.comments(issueId)).at(-1)?.body?.trim();
     const outcome = last ? `\n\n${last.length > 3000 ? last.slice(0, 3000) + "…" : last}` : "";
-    const by = [task.assigneeAgentId, at.agentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
-    if (!by) return;
-    await this.d.post(by, at.channelId, at.rootId, `${THREAD_REPORTS[task.status]} **${task.identifier ?? "The task"}** ${task.title}${outcome}`);
+    const doer = task.assigneeAgentId && task.assigneeAgentId !== by ? ` _(by ${this.d.agentName(task.assigneeAgentId)})_` : "";
+    try {
+      await this.d.post(by, at.channelId, at.rootId, `${THREAD_REPORTS[task.status]} **${task.identifier ?? "The task"}** ${task.title}${doer}${outcome}`);
+    } catch (err) {
+      await this.d.store.set(`issuethread:${issueId}`, at); // not reported: the next update tries again
+      throw err;
+    }
   }
 
   /** The task changed: note a new status; on done or cancelled, archive and report back. */
