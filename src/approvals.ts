@@ -1,7 +1,8 @@
 // Paperclip approvals as Mattermost posts with Approve / Reject buttons. Covers every
 // approval Paperclip raises: an agent asking the board (`request_board_approval`),
 // a high-risk tool held by the tool gateway, a hire, a budget override. Every approval
-// goes to the approvals channel, and also into the Mattermost thread the requesting
+// goes to the requesting agent's decisions channel (its own if set, else the approvals channel),
+// and also into the Mattermost thread the requesting
 // agent is answering; deciding on either card updates both. A click comes back through the plugin's webhook, signed so a forged click
 // is refused, and is decided as the Paperclip user mapped to the clicker's email.
 // A decision made in Paperclip itself updates the post too.
@@ -26,6 +27,30 @@ export interface ApprovalPoster {
   email(mattermostUserId: string): Promise<string | null>;
 }
 
+/** Where an agent's decisions go: its own channel if set and found, else the company's; `note` says when its own was not found. */
+export type ChannelFor = (agentId: string | null) => Promise<{ channelId: string; note?: string } | null>;
+
+/** The settings page's channel per agent: [{ agentId, channel }]. */
+export function parseAgentChannels(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (Array.isArray(value)) for (const r of value as { agentId?: unknown; channel?: unknown }[]) {
+    if (typeof r?.agentId === "string" && typeof r.channel === "string" && r.channel.trim()) out[r.agentId] = r.channel.trim();
+  }
+  return out;
+}
+
+export function decisionChannels(poster: Pick<ApprovalPoster, "channel">, perAgent: Record<string, string>, fallback: string): ChannelFor {
+  return async (agentId) => {
+    const own = agentId ? perAgent[agentId] : undefined;
+    if (own) {
+      const id = await poster.channel(own);
+      if (id) return { channelId: id };
+    }
+    const id = fallback ? await poster.channel(fallback) : null;
+    return id ? { channelId: id, ...(own ? { note: `Posted here because this agent's channel "${own}" was not found.` } : {}) } : null;
+  };
+}
+
 export interface ApprovalDeps {
   poster: ApprovalPoster;
   /** The Mattermost thread an agent is answering right now, if any. */
@@ -38,7 +63,7 @@ export interface ApprovalDeps {
   actionUrl: string;
   /** Signing key for button contexts. */
   key: string;
-  fallbackChannel: string;
+  channelFor: ChannelFor;
   /** Lower-cased email -> Paperclip user id. */
   approvers: Map<string, string>;
 }
@@ -129,15 +154,15 @@ export class Approvals {
     if (await d.store.get(`approval:${approvalId}`)) return;
     const a = await d.get(approvalId);
     if (!a || a.status !== "pending") return;
-    const targets: { channelId: string; rootId: string }[] = [];
+    const targets: { channelId: string; rootId: string; note?: string }[] = [];
     const thread = a.requestedByAgentId ? d.activeThread(a.requestedByAgentId) : null;
     if (thread) targets.push(thread);
-    const channelId = d.fallbackChannel ? await d.poster.channel(d.fallbackChannel) : null;
-    if (channelId && channelId !== thread?.channelId) targets.push({ channelId, rootId: "" });
+    const home = await d.channelFor(a.requestedByAgentId);
+    if (home && home.channelId !== thread?.channelId) targets.push({ channelId: home.channelId, rootId: "", note: home.note });
     if (!targets.length) return;
     const { message, props } = render(a, d.agentName(a.requestedByAgentId), d.actionUrl, d.key);
     const postIds: string[] = [];
-    for (const where of targets) postIds.push(await d.poster.post(a.requestedByAgentId, where, message, props));
+    for (const { note, ...where } of targets) postIds.push(await d.poster.post(a.requestedByAgentId, where, note ? `${message}\n_${note}_` : message, props));
     await d.store.set(`approval:${approvalId}`, { postIds });
   }
 

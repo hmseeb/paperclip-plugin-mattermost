@@ -1,12 +1,12 @@
 // Decision cards agents raise on Paperclip tasks ("issue-thread interactions"),
-// mirrored into the approvals channel. Confirmations and suggested tasks get Accept /
+// mirrored into the raising agent's decisions channel (its own, else the approvals channel). Confirmations and suggested tasks get Accept /
 // Reject buttons; a click is resolved as the clicker's Paperclip user. Questions get a
 // button per option; plugins cannot submit answers to a question card, so once every
 // question has a pick the answers are posted on the task as a comment from the person
 // who picked, which wakes the agent like a comment typed in Paperclip. The rarer kinds
 // are posted with a link. Paperclip sends plugins no event when a card is created, so
 // open tasks are polled.
-import { sign, type ApprovalPoster } from "./approvals.ts";
+import { sign, type ApprovalPoster, type ChannelFor } from "./approvals.ts";
 
 export interface Card {
   id: string;
@@ -35,7 +35,7 @@ export interface CardDeps {
   actionUrl: string;
   key: string;
   paperclipUrl: string;
-  channel: string;
+  channelFor: ChannelFor;
   approvers: Map<string, string>;
   now?: () => Date;
 }
@@ -163,8 +163,11 @@ export class Cards {
 
   private async pass(): Promise<void> {
     const d = this.d;
-    const channelId = await d.poster.channel(d.channel);
-    if (!channelId) return;
+    const homes = new Map<string | null, Awaited<ReturnType<ChannelFor>>>();
+    const home = async (agentId: string | null) => {
+      if (!homes.has(agentId)) homes.set(agentId, await d.channelFor(agentId));
+      return homes.get(agentId) ?? null;
+    };
     const now = (d.now ?? (() => new Date()))();
     // Cards raised before this feature first ran stay in Paperclip only.
     let since = await d.store.get<string>("cards:since");
@@ -178,8 +181,11 @@ export class Cards {
         if (posted[c.id]) {
           if (c.status !== "pending") { await this.close(c, posted[c.id]); delete posted[c.id]; }
         } else if (c.status === "pending" && new Date(c.createdAt).getTime() > Date.parse(since)) {
-          const { message, props } = renderCard(c, issue, d.agentName(c.createdByAgentId ?? issue.assigneeAgentId ?? null), d);
-          posted[c.id] = { postId: await d.poster.post(c.createdByAgentId ?? issue.assigneeAgentId ?? null, { channelId, rootId: "" }, message, props), issueId: issue.id };
+          const agentId = c.createdByAgentId ?? issue.assigneeAgentId ?? null;
+          const where = await home(agentId);
+          if (!where) continue; // no channel to post in: tried again on the next pass
+          const { message, props } = renderCard(c, issue, d.agentName(agentId), d);
+          posted[c.id] = { postId: await d.poster.post(agentId, { channelId: where.channelId, rootId: "" }, where.note ? `${message}\n_${where.note}_` : message, props), issueId: issue.id };
         }
       }
     }

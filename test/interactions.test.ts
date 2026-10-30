@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Cards, type Card, type OpenIssue } from "../src/interactions.ts";
-import { sign } from "../src/approvals.ts";
+import { decisionChannels, sign } from "../src/approvals.ts";
 
 const KEY = "k";
 const T0 = "2026-10-28T00:00:00.000Z";
 const later = "2026-10-28T01:00:00.000Z";
 const before = "2026-10-27T23:00:00.000Z";
 
-function setup() {
+function setup(perAgent: Record<string, string> = {}) {
   const issues: OpenIssue[] = [{ id: "i1", identifier: "BAD-9", title: "Launch site", assigneeAgentId: "a-cto" }];
   const byIssue = new Map<string, Card[]>([["i1", [
     { id: "old", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: before, payload: { prompt: "Old?" } },
@@ -17,11 +17,12 @@ function setup() {
   const responses: unknown[] = [];
   const comments: { issueId: string; body: string; actor: string }[] = [];
   const state = new Map<string, unknown>();
+  const channel = async (name: string) => (name === "decisions" ? "c-dec" : name === "client-reporting" ? "c-reports" : null);
   const c = new Cards({
     poster: {
       async post(agentId, where, message, props) { const id = `p${posts.length + 1}`; posts.push({ id, as: agentId, channelId: where.channelId, message, props }); return id; },
       async patch(postId, message, props) { Object.assign(posts.find((p) => p.id === postId)!, { message, props }); },
-      async channel(name) { return name === "decisions" ? "c-dec" : null; },
+      channel,
       async email(uid) { return uid === "mm-sam" ? "sam@example.com" : null; },
     },
     openIssues: async () => issues,
@@ -34,7 +35,7 @@ function setup() {
     async comment(issueId, body, actor) { comments.push({ issueId, body, actor }); },
     agentName: (id) => (id === "a-ceo" ? "CEO" : "CTO"),
     store: { async get<T>(k: string) { return (state.get(k) ?? null) as T | null; }, async set(k, v) { state.set(k, v); } },
-    actionUrl: "https://pc/hook", key: KEY, paperclipUrl: "https://pc", channel: "decisions",
+    actionUrl: "https://pc/hook", key: KEY, paperclipUrl: "https://pc", channelFor: decisionChannels({ channel }, perAgent, "decisions"),
     approvers: new Map([["sam@example.com", "u-sam"]]),
     now: () => new Date(T0),
   });
@@ -156,4 +157,13 @@ test("questions: forged or unmapped picks send nothing; multi-choice questions s
   m.add(question([{ id: "x", prompt: "Pick any", selectionMode: "multi", options: [{ id: "1", label: "One" }] }]));
   await m.c.poll();
   assert.deepEqual(m.posts[0].props.attachments[0].actions, []);
+});
+
+test("a card goes to the channel of the agent that raised it, others to the decisions channel", async () => {
+  const t = setup({ "a-reporting": "client-reporting" });
+  await t.c.poll();
+  t.add({ id: "r1", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-reporting", payload: { prompt: "Send the batch?" } });
+  t.add({ id: "r2", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Ship?" } });
+  await t.c.poll();
+  assert.deepEqual(t.posts.map((p) => [p.as, p.channelId]), [["a-reporting", "c-reports"], ["a-ceo", "c-dec"]]);
 });

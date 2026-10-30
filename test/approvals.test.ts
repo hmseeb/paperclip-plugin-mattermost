@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Approvals, parseApprovers, render, sign, type ApprovalInfo } from "../src/approvals.ts";
+import { Approvals, decisionChannels, parseAgentChannels, parseApprovers, render, sign, type ApprovalInfo } from "../src/approvals.ts";
 
 const KEY = "k";
 const URL_ = "https://pc.example/api/plugins/mattermost-bridge/webhooks/actions";
 
-function setup(opts: { active?: boolean; fallback?: string } = {}) {
+function setup(opts: { active?: boolean; fallback?: string; perAgent?: Record<string, string> } = {}) {
   const approvals = new Map<string, ApprovalInfo>([["ap1", {
     id: "ap1", type: "request_board_approval", status: "pending", requestedByAgentId: "a-cto", decidedByUserId: null,
     payload: { title: "Approve hosting spend", summary: "$42/month", recommendedAction: "Approve", risks: ["May grow"] },
@@ -13,11 +13,12 @@ function setup(opts: { active?: boolean; fallback?: string } = {}) {
   const posts: { id: string; as: string | null; channelId: string; rootId: string; message: string; props: any }[] = [];
   const decisions: { id: string; action: string; actor: string; note: string }[] = [];
   const state = new Map<string, unknown>();
+  const channel = async (name: string) => (name === "approvals" ? "c-approvals" : name === "client-reporting" ? "c-reports" : null);
   const a = new Approvals({
     poster: {
       async post(agentId, where, message, props) { const id = `p${posts.length + 1}`; posts.push({ id, as: agentId, ...where, message, props }); return id; },
       async patch(postId, message, props) { Object.assign(posts.find((p) => p.id === postId)!, { message, props }); },
-      async channel(name) { return name === "approvals" ? "c-approvals" : null; },
+      channel,
       async email(uid) { return uid === "mm-sam" ? "Sam@Example.com" : "stranger@x.com"; },
     },
     activeThread: (agentId) => (opts.active && agentId === "a-cto" ? { channelId: "c-dm", rootId: "root1" } : null),
@@ -28,7 +29,7 @@ function setup(opts: { active?: boolean; fallback?: string } = {}) {
       Object.assign(approvals.get(id)!, { status: action === "approve" ? "approved" : "rejected", decidedByUserId: actor });
     },
     store: { async get<T>(k: string) { return (state.get(k) ?? null) as T | null; }, async set(k, v) { state.set(k, v); } },
-    actionUrl: URL_, key: KEY, fallbackChannel: opts.fallback ?? "",
+    actionUrl: URL_, key: KEY, channelFor: decisionChannels({ channel }, opts.perAgent ?? {}, opts.fallback ?? ""),
     approvers: parseApprovers("# board\nsam@example.com = u-sam\nnot a line\n"),
   });
   const click = (user: string, action: string, sig = sign(KEY, "ap1", action)) =>
@@ -100,4 +101,22 @@ test("render falls back to the type when the payload has no title", () => {
   const r = render({ id: "x", type: "hire_agent", status: "pending", requestedByAgentId: null, decidedByUserId: null, payload: {} }, "CEO", URL_, KEY);
   assert.equal(r.message, "**Hire request** from CEO");
   assert.equal((r.props.attachments as any)[0].title, "Hire request");
+});
+
+test("an agent with its own channel gets its approvals there; a channel that is gone falls back with a note", async () => {
+  const own = setup({ fallback: "approvals", perAgent: { "a-cto": "client-reporting" } });
+  await own.a.created("ap1");
+  assert.deepEqual(own.posts.map((p) => p.channelId), ["c-reports"]);
+  const gone = setup({ fallback: "approvals", perAgent: { "a-cto": "deleted-channel" } });
+  await gone.a.created("ap1");
+  assert.deepEqual(gone.posts.map((p) => p.channelId), ["c-approvals"]);
+  assert.match(gone.posts[0].message, /this agent's channel "deleted-channel" was not found/);
+  const other = setup({ fallback: "approvals", perAgent: { "a-ceo": "client-reporting" } });
+  await other.a.created("ap1");
+  assert.deepEqual(other.posts.map((p) => p.channelId), ["c-approvals"], "another agent's setting does not apply");
+});
+
+test("channel per agent from settings: only complete rows", () => {
+  assert.deepEqual(parseAgentChannels([{ agentId: "a", channel: " reports " }, { agentId: "b", channel: "" }, { channel: "x" }, null]), { a: "reports" });
+  assert.deepEqual(parseAgentChannels(undefined), {});
 });

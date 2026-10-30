@@ -49,6 +49,7 @@ Or install it from **Settings → Plugins** in Paperclip.
    - **Mattermost admin token**: pick the secret from step 2.
    - **Paperclip public URL**: filled in from Paperclip's own settings. The page checks it by sending a test click through it.
    - **Approvals channel**: where approvals and decision cards are posted.
+   - **Channel per agent** (optional): send one agent's approvals, decision cards and computer help requests to its own channel, for example a client reporting agent's drafts to `#client-reporting`. Only approvers can decide them, but everyone in the channel sees them. A channel that cannot be found falls back to the approvals channel, with a note.
    - **Agents in Mattermost**: all agents, or the ones you pick.
    - **Who can talk to agents**: everyone, or the people you pick, each with all agents or some.
    - **Approvers**: who may decide approvals and cards from Mattermost. Their clicks count as their Paperclip decisions, matched to Mattermost by email.
@@ -85,7 +86,7 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag -a v0.18.3 -m v0.18.3 && git push origin main v0.18.3
+git tag -a v0.19.0 -m v0.19.0 && git push origin main v0.19.0
 ```
 
 GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.

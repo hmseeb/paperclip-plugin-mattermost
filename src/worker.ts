@@ -2,7 +2,7 @@ import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin
 import { createHmac } from "node:crypto";
 import { Cards } from "./interactions.ts";
 import { choiceProps, chosenProps, verifyChoice, type ChoiceContext } from "./choices.ts";
-import { Approvals, parseApprovers, sign, signed, type ActionRequest, type ApprovalPoster } from "./approvals.ts";
+import { Approvals, decisionChannels, parseAgentChannels, parseApprovers, sign, signed, type ActionRequest, type ApprovalPoster, type ChannelFor } from "./approvals.ts";
 import { Actions, type PendingRequest } from "./actions.ts";
 import { WorkLinks, FROM_PAPERCLIP } from "./worklinks.ts";
 import { HELP } from "./help.ts";
@@ -60,7 +60,7 @@ class Tenant {
   key = "";
   private approvers = new Map<string, string>();
   private paperclipUrl = "";
-  private approvalsChannel = "";
+  private channelFor: ChannelFor = async () => null;
   private timers: ReturnType<typeof setInterval>[] = [];
 
   constructor(readonly companyId: string) {}
@@ -179,20 +179,22 @@ class Tenant {
     };
     const approvers = parseApprovers(config.approvers);
     const approvalsChannel = typeof config.approvalsChannel === "string" ? config.approvalsChannel.trim() : "";
+    const agentChannels = parseAgentChannels(config.agentChannels);
+    const channelFor = decisionChannels(this.poster(manager, roster), agentChannels, approvalsChannel);
     const agentName = (agentId: string | null) => (agentId && roster.roster().byAgentId(agentId)?.agentName) || "Paperclip";
     const approvals = paperclipUrl ? new Approvals({
       poster: this.poster(manager, roster), activeThread: (agentId) => bridge.activeThread(agentId), agentName,
       get: async (id) => (await ctx.approvals.get(id, companyId)) as never,
       decide: async (id, action, actorUserId, decisionNote) => { await ctx.approvals.decide(id, { action, actorUserId, decisionNote }, companyId); },
-      store, actionUrl, key, fallbackChannel: approvalsChannel, approvers,
+      store, actionUrl, key, channelFor, approvers,
     }) : null;
-    const cards = paperclipUrl && approvalsChannel ? new Cards({
+    const cards = paperclipUrl && (approvalsChannel || Object.keys(agentChannels).length) ? new Cards({
       poster: this.poster(manager, roster),
       openIssues: async () => (await Promise.all(OPEN_STATUSES.map((status) => ctx.issues.list({ companyId, status, limit: 500 })))).flat(),
       cards: async (issueId) => (await ctx.issues.listInteractions(issueId, companyId)) as never,
       respond: async (issueId, cardId, action, actorUserId, reason) => { await ctx.issues.respondInteraction(issueId, cardId, { action, actorUserId, reason }, companyId); },
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
-      agentName, store, actionUrl, key, paperclipUrl, channel: approvalsChannel, approvers,
+      agentName, store, actionUrl, key, paperclipUrl, channelFor, approvers,
     }) : null;
     const poster = this.poster(manager, roster);
     const actions = new Actions({
@@ -214,7 +216,8 @@ class Tenant {
       askApproval: async (req) => {
         if (!paperclipUrl || !approvers.size) throw Object.assign(new Error("this needs a person's approval, and nobody can approve from Mattermost yet (the plugin needs its Paperclip public URL and approvers set)"), { status: 403 });
         const { message, props } = requestCard(req, actionUrl, key);
-        const targets = [req.origin, approvalsChannel ? await poster.channel(approvalsChannel).then((id) => id && id !== req.origin?.channelId ? { channelId: id, rootId: "" } : null) : null];
+        const home = await channelFor(req.agentId);
+        const targets = [req.origin, home && home.channelId !== req.origin?.channelId ? { channelId: home.channelId, rootId: "" } : null];
         const postIds: string[] = [];
         for (const where of targets) if (where) postIds.push(await poster.post(req.agentId, where, message, props));
         await store.set(`reqcard:${req.id}`, postIds);
@@ -235,7 +238,7 @@ class Tenant {
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
       comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId })),
     });
-    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, key, approvers, paperclipUrl, approvalsChannel });
+    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, key, approvers, paperclipUrl, channelFor });
     this.status = `connecting to ${url} as @${manager.botUsername}`;
     // Everything below runs from Mattermost sockets and timers, outside this invocation.
     detached(() => {
@@ -290,7 +293,7 @@ class Tenant {
     if (!this.manager || !this.bots || !this.bridge || !p.agentId) return;
     const poster = this.poster(this.manager, this.bots);
     const where = this.bridge.activeThread(p.agentId)
-      ?? (this.approvalsChannel ? await poster.channel(this.approvalsChannel).then((id) => (id ? { channelId: id, rootId: "" } : null)) : null);
+      ?? await this.channelFor(p.agentId).then((home) => (home ? { channelId: home.channelId, rootId: "" } : null));
     if (!where) return;
     const link = this.paperclipUrl && p.path ? `${this.paperclipUrl}${p.path}` : null;
     const on = p.url ? ` on ${p.url}` : "";
