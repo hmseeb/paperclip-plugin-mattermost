@@ -44,6 +44,16 @@ async function checkVersion(): Promise<void> {
 
 const errText = (err: unknown) => String((err as Error)?.message ?? err);
 
+/** A team's public and private channels (the admin account sees private ones without being in them). */
+async function teamChannels(manager: MattermostClient, teamId: string) {
+  type Ch = { id: string; name: string; display_name: string; type: string };
+  const [open, closed] = await Promise.all([
+    manager.request<Ch[]>("GET", `/teams/${teamId}/channels?per_page=200`).catch(() => [] as Ch[]),
+    manager.request<Ch[]>("GET", `/teams/${teamId}/channels/private?per_page=200`).catch(() => [] as Ch[]),
+  ]);
+  return [...open.filter((ch) => ch.type === "O"), ...closed.filter((ch) => ch.type === "P")];
+}
+
 /**
  * One company's Mattermost: its own server, admin token, bots, sockets, state and
  * button key. Companies never share any of it.
@@ -139,7 +149,7 @@ class Tenant {
           try { return (await manager.request<{ id: string }>("GET", `/teams/${team.id}/channels/name/${encodeURIComponent(wanted.toLowerCase())}`)).id; } catch { /* not a URL name here */ }
         }
         for (const team of teams) {
-          const list = await manager.request<{ id: string; display_name: string }[]>("GET", `/teams/${team.id}/channels?per_page=200`).catch(() => []);
+          const list = await teamChannels(manager, team.id);
           const hit = list.find((ch) => ch.display_name.trim().toLowerCase() === wanted.toLowerCase());
           if (hit) return hit.id;
         }
@@ -433,8 +443,7 @@ const plugin = definePlugin({
       const accounts: Record<string, string | null> = {};
       if (manager) {
         for (const team of await manager.request<{ id: string }[]>("GET", "/users/me/teams").catch(() => [])) {
-          const list = await manager.request<{ name: string; display_name: string; type: string }[]>("GET", `/teams/${team.id}/channels?per_page=200`).catch(() => []);
-          channels.push(...list.filter((ch) => ch.type === "O").map((ch) => ({ name: ch.name, displayName: ch.display_name })));
+          for (const ch of await teamChannels(manager, team.id)) channels.push({ name: ch.name, displayName: ch.type === "P" ? `${ch.display_name} (private)` : ch.display_name });
         }
         channels = channels.sort((a, b) => a.displayName.localeCompare(b.displayName));
         for (const email of emails) {
