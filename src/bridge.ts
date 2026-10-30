@@ -79,7 +79,7 @@ interface ThreadState {
 }
 
 /** A reply being waited for, kept so a plugin restart can still deliver it (see `resume`). */
-interface InFlight { agentId: string; sessionId: string; channelId: string; channelType: string; channelName: string; at: number }
+interface InFlight { agentId: string; sessionId: string; channelId: string; channelType: string; channelName: string; at: number; /** The message being answered. */ postId?: string }
 const IN_FLIGHT = "inflight";
 const IN_FLIGHT_MAX_AGE = 3 * 60 * 60 * 1000;
 const RESUME_PROMPT = "The Mattermost plugin restarted while you were working on the conversation above, so your reply did not reach the thread. When you have finished, give your answer to the latest message again; it is posted in the thread.";
@@ -379,7 +379,7 @@ export class Bridge {
     this.active.set(member.agentId, here);
     try {
       let sessionId = thread && thread.agentId === member.agentId ? thread.sessionId : null;
-      const flight = (id: string) => this.inFlight(rootId, { agentId: member.agentId, sessionId: id, channelId: post.channel_id, channelType: evt.channelType, channelName: evt.channelName, at: Date.now() });
+      const flight = (id: string) => this.inFlight(rootId, { agentId: member.agentId, sessionId: id, channelId: post.channel_id, channelType: evt.channelType, channelName: evt.channelName, at: Date.now(), postId: post.id });
       try {
         if (!sessionId) throw new Error("no session yet");
         await flight(sessionId);
@@ -406,11 +406,28 @@ export class Bridge {
     await this.postReply(member, { channelId: post.channel_id, rootId, channelType: evt.channelType, channelName: evt.channelName }, reply, outbox);
   }
 
-  /** Records (or with null clears) the reply this thread is waiting for. */
-  private async inFlight(rootId: string, f: InFlight | null): Promise<void> {
-    const all = (await this.store.get<Record<string, InFlight>>(IN_FLIGHT)) ?? {};
-    if (f) all[rootId] = f; else delete all[rootId];
-    await this.store.set(IN_FLIGHT, all);
+  private flights: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Records (or with null clears) the reply this thread is waiting for. One change at a time: the
+   * record is shared by every thread, and two read-change-writes at once bring back a cleared entry.
+   */
+  private inFlight(rootId: string, f: InFlight | null): Promise<void> {
+    const next = this.flights.catch(() => {}).then(async () => {
+      const all = (await this.store.get<Record<string, InFlight>>(IN_FLIGHT)) ?? {};
+      if (f) all[rootId] = f; else delete all[rootId];
+      await this.store.set(IN_FLIGHT, all);
+    });
+    this.flights = next;
+    return next;
+  }
+
+  /** Whether the agent already replied in the thread after the message it was answering. */
+  private async answered(rootId: string, f: InFlight, botUserId: string): Promise<boolean> {
+    if (!f.postId) return false;
+    const posts = await this.directory.threadPosts(rootId).catch(() => []);
+    const i = posts.findIndex((p) => p.id === f.postId);
+    return i >= 0 && posts.slice(i + 1).some((p) => p.user_id === botUserId);
   }
 
   /**
@@ -422,7 +439,7 @@ export class Bridge {
     let n = 0;
     for (const [rootId, f] of Object.entries(all)) {
       const member = this.roster().byAgentId(f.agentId);
-      if (!member || Date.now() - f.at > IN_FLIGHT_MAX_AGE) { await this.inFlight(rootId, null); continue; }
+      if (!member || Date.now() - f.at > IN_FLIGHT_MAX_AGE || await this.answered(rootId, f, member.botUserId)) { await this.inFlight(rootId, null); continue; }
       n++;
       const prev = this.queues.get(rootId) ?? Promise.resolve();
       const next = prev.then(async () => {
@@ -430,7 +447,8 @@ export class Bridge {
         typing();
         const timer = setInterval(typing, TYPING_EVERY_MS);
         try {
-          const reply = await this.agents.ask(f.sessionId, RESUME_PROMPT);
+          const asked = f.postId ? (await this.directory.threadPosts(rootId).catch(() => [])).find((p) => p.id === f.postId)?.message : undefined;
+          const reply = await this.agents.ask(f.sessionId, asked ? `${RESUME_PROMPT}\n\nThe message you were answering:\n${asked}` : RESUME_PROMPT);
           await this.inFlight(rootId, null);
           await this.postReply(member, { channelId: f.channelId, rootId, channelType: f.channelType, channelName: f.channelName }, reply, null);
         } catch (err) {

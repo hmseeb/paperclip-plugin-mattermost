@@ -56,7 +56,7 @@ function setup(opts: { reply?: Reply; files?: Files; buttons?: boolean; canTalk?
   const bridge = new Bridge(() => roster, directory, agents, store, () => {}, opts.files ?? null,
     opts.buttons ? (where, choices) => choiceProps("k", "https://pc/actions", where, choices) : null, opts.canTalk ?? null, opts.turnLimit);
   const handle = (e: PostedEvent) => { humanPosts.push(e.post); return bridge.handle(e); };
-  return { handle, posts, typings, uploads, reactions, notes, sessions, prompts, joined, state, bridge };
+  return { handle, posts, typings, uploads, reactions, notes, sessions, prompts, joined, state, bridge, humanPosts };
 }
 
 let seq = 0;
@@ -397,4 +397,39 @@ test("a normal reply leaves nothing to resume", async () => {
   const t = setup();
   await t.handle(evt("@cto hi", { id: "q1" }));
   assert.deepEqual(t.state.get("inflight"), {});
+});
+
+test("one thread's reply record cleared while another is recorded does not come back (no lost updates)", async () => {
+  const t = setup();
+  const real = t.state;
+  const slow = { async get<T>(k: string) { await new Promise((r) => setTimeout(r, 2)); return structuredClone(real.get(k) ?? null) as T | null; }, async set(k: string, v: unknown) { await new Promise((r) => setTimeout(r, 3)); real.set(k, structuredClone(v)); } };
+  const b = t.bridge as unknown as { store: typeof slow; inFlight(rootId: string, f: unknown): Promise<void> };
+  b.store = slow;
+  const rec = (root: string) => ({ agentId: "a-cto", sessionId: "s", channelId: "c1", channelType: "O", channelName: "general", at: Date.now(), postId: root });
+  await b.inFlight("A", rec("A"));
+  await Promise.all([b.inFlight("A", null), b.inFlight("B", rec("B"))]);
+  assert.deepEqual(Object.keys(real.get("inflight") as object), ["B"]);
+});
+
+test("after a restart, a reply that already reached the thread is not asked for again", async () => {
+  const t = setup();
+  await t.handle(evt("@cto run the daily reporting", { id: "root-d" }));
+  // As if the restart came after the reply posted but its record was not cleared.
+  t.state.set("inflight", { "root-d": { agentId: "a-cto", sessionId: "s1", channelId: "c1", channelType: "O", channelName: "general", at: Date.now(), postId: "root-d" } });
+  const before = t.prompts.length;
+  await t.bridge.resume();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(t.prompts.length, before, "the agent is not asked again");
+  assert.deepEqual(t.state.get("inflight"), {});
+});
+
+test("a resumed reply is given the message it was answering", async () => {
+  // A fresh worker after the restart: the thread holds the person's message and no reply yet.
+  const t = setup({ reply: async () => "DNS is fine." });
+  t.humanPosts.push(evt("@cto check the DNS", { id: "root-q" }).post);
+  t.state.set("inflight", { "root-q": { agentId: "a-cto", sessionId: "s7", channelId: "c1", channelType: "O", channelName: "general", at: Date.now(), postId: "root-q" } });
+  await t.bridge.resume();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.match(t.prompts.find((p) => p.sessionId === "s7")?.prompt ?? "", /The message you were answering:\n@cto check the DNS/);
+  assert.equal(t.posts.at(-1)?.message, "DNS is fine.");
 });
