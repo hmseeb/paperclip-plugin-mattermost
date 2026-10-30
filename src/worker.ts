@@ -9,6 +9,7 @@ import { HELP } from "./help.ts";
 import { randomUUID } from "node:crypto";
 import { absoluteLinks, Bridge, DEFAULT_TURN_LIMIT, linkTasks, type Agents, type Directory, type PostedEvent, type Store } from "./bridge.ts";
 import { accessCheck } from "./access.ts";
+import { AutoChannels } from "./autochannels.ts";
 import { MattermostClient } from "./mattermost.ts";
 import { detached } from "./detach.ts";
 import { diskFiles } from "./files.ts";
@@ -67,6 +68,7 @@ class Tenant {
   cards: Cards | null = null;
   actions: Actions | null = null;
   work: WorkLinks | null = null;
+  auto: AutoChannels | null = null;
   key = "";
   private approvers = new Map<string, string>();
   private paperclipUrl = "";
@@ -248,7 +250,41 @@ class Tenant {
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
       comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId })),
     });
-    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, key, approvers, paperclipUrl, channelFor });
+    // Paperclip people as Mattermost accounts, by the emails the settings know (approvers, people who can talk to agents).
+    const people = new Map<string, { email: string; name?: string }>();
+    for (const p of [...(Array.isArray(config.allowedUsers) ? config.allowedUsers : []), ...(Array.isArray(config.approvers) ? config.approvers : [])] as { userId?: string; email?: string; name?: string }[]) {
+      if (p?.userId && p.email) people.set(p.userId, { email: p.email.toLowerCase(), name: p.name });
+    }
+    const auto = new AutoChannels({
+      store,
+      task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
+      comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ body: c.body })),
+      hasBot: (agentId) => Boolean(roster.clientOf(agentId)),
+      agentName: (agentId) => agentName(agentId),
+      open: async (owner, t) => {
+        const bot = roster.clientOf(owner);
+        if (!bot) throw new Error("the task's agent has no Mattermost bot");
+        // No report-back target: the thread the task was asked in gets its outcome already (issuethread).
+        const r = await actions.doCreateChannel(owner, bot, { name: `${t.identifier ?? ""} ${t.title}`.trim().slice(0, 60), private: true, taskId: t.id, purpose: "Work channel for this task; archived when it is done." }, null);
+        return r.channelId;
+      },
+      add: async (channelId, agentIds, userIds) => {
+        const missing: string[] = [];
+        const ids = agentIds.map((a) => roster.clientOf(a)?.botUserId).filter((x): x is string => Boolean(x));
+        for (const u of userIds) {
+          const p = people.get(u);
+          const mm = p ? await manager.request<{ id: string }>("GET", `/users/email/${encodeURIComponent(p.email)}`).catch(() => null) : null;
+          if (mm) ids.push(mm.id); else missing.push(p?.name ?? p?.email ?? "a person not in the plugin settings");
+        }
+        for (const id of ids) await manager.request("POST", `/channels/${channelId}/members`, { user_id: id }).catch(() => {});
+        return missing;
+      },
+      post: async (agentId, channelId, text) => {
+        const as = roster.clientOf(agentId) ?? manager;
+        await as.request("POST", "/posts", { channel_id: channelId, message: linkTasks(absoluteLinks(text, paperclipUrl), paperclipUrl, bridge.taskPrefix), props: FROM_PAPERCLIP });
+      },
+    });
+    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, auto, key, approvers, paperclipUrl, channelFor });
     this.status = `connecting to ${url} as @${manager.botUsername}`;
     // Everything below runs from Mattermost sockets and timers, outside this invocation.
     detached(() => {
@@ -273,7 +309,7 @@ class Tenant {
     this.timers = [];
     this.bots?.close();
     this.manager?.close();
-    Object.assign(this, { manager: null, bots: null, bridge: null, approvals: null, cards: null, actions: null, work: null });
+    Object.assign(this, { manager: null, bots: null, bridge: null, approvals: null, cards: null, actions: null, work: null, auto: null });
   }
 
   /** Approve / Reject on an agent's ask-first request (a broadcast, a public channel, an invite). */
@@ -469,6 +505,7 @@ const plugin = definePlugin({
       const work = tenants.get(e.companyId)?.work;
       await work?.updated(e.entityId);
       await work?.threadUpdate(e.entityId);
+      await tenants.get(e.companyId)?.auto?.changed(e.entityId);
     }));
     ctx.events.on("plugin.agent-computer.needs-person", (e) => quietly("could not post a computer help request", async () => {
       await tenants.get(e.companyId)?.computerNeedsPerson((e.payload ?? {}) as never);
@@ -482,6 +519,7 @@ const plugin = definePlugin({
       const by = issue?.createdByAgentId;
       const at = by ? tenant.bridge.activeThread(by) : null;
       if (at) await tenant.store().set(`issuethread:${e.entityId}`, { ...at, agentId: by, status: issue?.status });
+      await tenant.auto?.changed(e.entityId);
     }));
     ctx.events.on("approval.decided", (e) => quietly("could not update approval", async () => { if (e.entityId) await tenants.get(e.companyId)?.approvals?.decided(e.entityId); }));
     detached(() => void checkVersion().catch(() => {}));

@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "mattermost-bridge",
   apiVersion: 1,
-  version: "0.19.2",
+  version: "0.20.0",
   displayName: "Mattermost",
   description:
     "Every agent becomes its own Mattermost bot. DM an agent or mention it in a channel and it answers in the thread, showing its steps as it works; follow-ups continue the conversation. Paperclip approvals arrive with Approve / Reject buttons.",

@@ -18,6 +18,7 @@ Your [Paperclip](https://github.com/paperclipai/paperclip) agents as Mattermost 
 - **Steering.** A message you send in a thread while its agent is still working reaches that run: the agent reads it between steps (and an agent waiting at its computer stops waiting to read it), so "stop" or a correction lands mid-task. One it read is marked ✅ and not run again.
 - **Agents work with agents.** An agent mentioning another agent starts it, and it answers in the thread. After a set number of agent-to-agent messages in a thread (10 by default, set in settings), they pause until a person replies.
 - **Work channels.** For an investigation, incident or project, an agent opens a private channel (`inc-checkout-5xx`), pulls in the people and agents it needs, and ties it to a Paperclip task. Task comments and status changes show up in the channel. When the task is done or cancelled, the channel is archived and the outcome is posted back where the work was asked for.
+- **Automatic work channels.** The plugin opens one itself when people and agents work on a task together: an agent's task that a person is assigned to, reviews or approves, or a task whose subtasks are with at least two other agents. It adds the task's agent, the other agents, the people involved and whoever asked for it (people are matched by the emails in the plugin settings), adds anyone who joins later, and notes each subtask that finishes, blocks or is cancelled.
 - **Ask first.** Some actions wait for an approver to click Approve: `@channel`, `@all` and `@here`, public channels, and adding people to a channel the agent didn't create. Agents can't change or archive channels they didn't create, remove anyone, or touch team and server settings.
 - **Agent computer requests.** With the Agent computer plugin installed, an agent that needs a person at its computer (a login, 2FA, a password) posts in the thread it is working in, or the approvals channel, with a link to take over.
 - **One install, many companies.** Each Paperclip company connects its own Mattermost, with its own settings, bots and state.
@@ -86,7 +87,7 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag -a v0.19.2 -m v0.19.2 && git push origin main v0.19.2
+git tag -a v0.20.0 -m v0.20.0 && git push origin main v0.20.0
 ```
 
 GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.
