@@ -17,6 +17,7 @@ function setup(perAgent: Record<string, string> = {}, threads: Record<string, { 
   const responses: unknown[] = [];
   const comments: { issueId: string; body: string; actor: string }[] = [];
   const state = new Map<string, unknown>();
+  const dialogs: { triggerId: string; dialog: Record<string, unknown> }[] = [];
   const channel = async (name: string) => (name === "decisions" ? "c-dec" : name === "client-reporting" ? "c-reports" : null);
   const c = new Cards({
     poster: {
@@ -38,9 +39,10 @@ function setup(perAgent: Record<string, string> = {}, threads: Record<string, { 
     actionUrl: "https://pc/hook", key: KEY, paperclipUrl: "https://pc", channelFor: decisionChannels({ channel }, perAgent, "decisions"), threadOf: async (id) => threads[id] ?? null,
     approvers: new Map([["sam@example.com", "u-sam"]]),
     now: () => new Date(T0),
+    openDialog: async (triggerId, dialog) => { dialogs.push({ triggerId, dialog }); },
   });
   const add = (card: Card) => byIssue.get("i1")!.push(card);
-  return { c, posts, responses, comments, add, byIssue };
+  return { c, posts, responses, comments, add, byIssue, dialogs };
 }
 
 test("cards raised after the first run are posted to the channel, as the agent that raised them; older ones are not", async () => {
@@ -116,8 +118,7 @@ test("questions: each option is a button, and one pick on a one-question card se
   await t.c.poll();
   const att = t.posts[0].props.attachments;
   assert.equal(att.length, 1);
-  assert.deepEqual(att[0].actions.map((a: any) => a.name), ["Sanity", "Contentful"]);
-  assert.match(att[0].text, /Or answer something else in Paperclip/);
+  assert.deepEqual(att[0].actions.map((a: any) => a.name), ["Sanity", "Contentful", "Other…"], "another answer is typed in a form");
   assert.equal(await t.c.click({ user_id: "mm-sam", user_name: "sam", context: pickCtx("cms", "c") }), null);
   assert.deepEqual(t.comments, [{ issueId: "i1", actor: "u-sam", body: 'Answer to "Launch choices" (question q1), sent from Mattermost:\n\n- Which CMS? **Contentful**' }]);
   const after = t.posts[0].props.attachments[0];
@@ -208,4 +209,41 @@ test("a card already in the decisions channel is copied to its thread only if it
   (t.c as unknown as { d: { now: () => Date } }).d.now = () => new Date(Date.parse(later) + 2 * 24 * 60 * 60 * 1000);
   await t.c.poll();
   assert.deepEqual(t.posts.map((p) => p.channelId), ["c-dec"], "two days old: left in the channel");
+});
+
+test("a question wanting a typed answer opens a form in Mattermost; what is typed goes to the task as the person's answer", async () => {
+  const t = setup();
+  await t.c.poll();
+  t.add({ id: "tq", issueId: "i1", kind: "ask_user_questions", status: "pending", createdAt: later, createdByAgentId: "a-ceo",
+    payload: { questions: [{ id: "scope", prompt: "Which counts do you need?", selectionMode: "single", allowOther: true, options: [{ id: "paperclip_text_answer", label: "Type an answer", freeText: true }] }] } });
+  await t.c.poll();
+  const btn = t.posts[0].props.attachments[0].actions[0];
+  assert.equal(btn.name, "Type an answer…");
+  const ctx = btn.integration.context;
+  assert.match(ctx.action, /^text:scope:/);
+  assert.equal(await t.c.click({ user_id: "mm-eve", trigger_id: "tr0", context: ctx }), "You are not set up to decide from Mattermost. Ask an admin to tick you under Approvers in the plugin settings.");
+  assert.equal(await t.c.click({ user_id: "mm-sam", trigger_id: "tr1", context: ctx }), null);
+  assert.equal(t.dialogs.length, 1);
+  assert.equal(t.dialogs[0].triggerId, "tr1");
+  assert.equal(t.dialogs[0].dialog.introduction_text, "Which counts do you need?");
+  assert.deepEqual(JSON.parse(String(t.dialogs[0].dialog.state)), ctx);
+  // The form is sent back with the button's context.
+  assert.equal(await t.c.click({ user_id: "mm-sam", user_name: "sam", context: ctx, submission: { answer: "" } }), "Type an answer first.");
+  assert.equal(await t.c.click({ user_id: "mm-sam", user_name: "sam", context: ctx, submission: { answer: "Use the 30-day export.\nNo customer names." } }), null);
+  assert.equal(t.comments.length, 1);
+  assert.match(t.comments[0].body, /Which counts do you need\?\n\n  Use the 30-day export\.\n  No customer names\./);
+  assert.equal(t.comments[0].actor, "u-sam");
+});
+
+test("a question that allows another answer gets an Other button that opens the form", async () => {
+  const t = setup();
+  await t.c.poll();
+  t.add({ id: "oq", issueId: "i1", kind: "ask_user_questions", status: "pending", createdAt: later, createdByAgentId: "a-ceo",
+    payload: { questions: [{ id: "q1", prompt: "Saturday hours?", selectionMode: "single", allowOther: true, options: [{ id: "a", label: "09:00" }, { id: "b", label: "08:00" }] }] } });
+  await t.c.poll();
+  const names = t.posts[0].props.attachments[0].actions.map((a: { name: string }) => a.name);
+  assert.deepEqual(names, ["09:00", "08:00", "Other…"]);
+  const other = t.posts[0].props.attachments[0].actions[2].integration.context;
+  await t.c.click({ user_id: "mm-sam", user_name: "sam", context: other, submission: { answer: "10:00 in Texas, 09:00 elsewhere" } });
+  assert.match(t.comments[0].body, /10:00 in Texas, 09:00 elsewhere/);
 });

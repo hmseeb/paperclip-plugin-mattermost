@@ -208,6 +208,7 @@ class Tenant {
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
       agentName, store, actionUrl, key, paperclipUrl, channelFor, approvers,
       threadOf: (issueId) => store.get<{ channelId: string; rootId: string; agentId?: string }>(`issuethread:${issueId}`),
+      openDialog: async (triggerId, dialog) => { await manager.request("POST", "/actions/dialogs/open", { trigger_id: triggerId, url: actionUrl, dialog }); },
     }) : null;
     const poster = this.poster(manager, roster);
     const actions = new Actions({
@@ -546,7 +547,14 @@ const plugin = definePlugin({
 
   async onWebhook(input) {
     if (input.endpointKey !== "actions" || receivePing(input.parsedBody)) return;
-    const req = (input.parsedBody ?? {}) as ActionRequest & { channel_id?: string };
+    let req = (input.parsedBody ?? {}) as ActionRequest & { channel_id?: string; type?: string; state?: string; cancelled?: boolean; submission?: Record<string, unknown> };
+    // A typed answer from a form a button opened: the button's (signed) context comes back as its state.
+    if (req.type === "dialog_submission") {
+      if (req.cancelled) return;
+      let context: ActionRequest["context"];
+      try { context = JSON.parse(String(req.state ?? "")); } catch { return; }
+      req = { user_id: req.user_id, channel_id: req.channel_id, context, submission: req.submission ?? {} };
+    }
     const companyId = (req.context as { companyId?: unknown } | undefined)?.companyId;
     // Buttons from before companies were stamped on them belong to the only company there was.
     const tenant = typeof companyId === "string" ? tenants.get(companyId) : tenants.size === 1 ? [...tenants.values()][0] : undefined;

@@ -40,18 +40,20 @@ export interface CardDeps {
   /** The Mattermost thread a task was asked for in, and the agent that thread is with. */
   threadOf(issueId: string): Promise<{ channelId: string; rootId: string; agentId?: string } | null>;
   approvers: Map<string, string>;
+  /** Opens a Mattermost form (interactive dialog) for the click with this trigger id. */
+  openDialog?(triggerId: string, dialog: Record<string, unknown>): Promise<void>;
   now?: () => Date;
 }
 
-interface Picked { optionId: string; label: string; by: string }
+interface Picked { optionId: string; label: string; by: string; typed?: boolean }
 /** A posted card; for questions, the picks so far and who sent the answers. */
 interface Tracked { postId: string; issueId: string; by?: string; picks?: Record<string, Picked>; sent?: string; /** The same card in the thread the task was asked for in. */ threadPostId?: string }
-interface Question { id: string; prompt?: string; helpText?: string; selectionMode?: string; allowOther?: boolean; options?: { id: string; label?: string }[] }
+interface Question { id: string; prompt?: string; helpText?: string; selectionMode?: string; allowOther?: boolean; options?: { id: string; label?: string; freeText?: boolean }[] }
 
 /** Questions answerable with buttons: every one single-choice with options to click. */
 function buttonQuestions(c: Card): Question[] | null {
   const qs = Array.isArray(c.payload?.questions) ? (c.payload!.questions as Question[]) : [];
-  if (!qs.length || qs.some((q) => !q.id || q.selectionMode === "multi" || !(q.options ?? []).some((o) => o.id && str(o.label)))) return null;
+  if (!qs.length || qs.some((q) => !q.id || q.selectionMode === "multi" || !(q.allowOther || (q.options ?? []).some((o) => o.id && str(o.label))))) return null;
   return qs;
 }
 type Posted = Record<string, Tracked>;
@@ -62,6 +64,14 @@ const OUTCOME: Record<string, string> = { accepted: ":white_check_mark: Accepted
 
 /** How old a card already in the decisions channel may be and still be copied to its thread. */
 const CATCH_UP_MS = 24 * 60 * 60 * 1000;
+
+type ClickRequest = {
+  user_id?: string; user_name?: string; trigger_id?: string;
+  context?: { issueId?: string; cardId?: string; action?: string; sig?: string };
+  /** A form's fields, when this is a typed answer being sent. */
+  submission?: Record<string, unknown>;
+};
+const NOT_APPROVER = "You are not set up to decide from Mattermost. Ask an admin to tick you under Approvers in the plugin settings.";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const sig = (key: string, c: { issueId: string; cardId: string }, action: string) => sign(key, `card:${c.issueId}:${c.cardId}`, action);
@@ -79,16 +89,24 @@ function renderQuestions(c: Card, qs: Question[], message: string, d: RenderDeps
   const blocks = qs.map((q, i) => ({
     color: t?.sent ? "#3db887" : "#f2a900",
     ...(i === 0 ? { title: str(c.title) || str(p.title) || "Question" } : {}),
-    text: [`**${str(q.prompt)}**`, str(q.helpText), q.allowOther && open ? "_Or answer something else in Paperclip (link above)._" : "", picks[q.id] && !open ? `Answer: **${picks[q.id].label}**` : ""].filter(Boolean).join("\n"),
+    text: [`**${str(q.prompt)}**`, str(q.helpText), picks[q.id] && !open ? (picks[q.id].typed ? `Answer:\n> ${picks[q.id].label.replace(/\n/g, "\n> ")}` : `Answer: **${picks[q.id].label}**`) : ""].filter(Boolean).join("\n"),
     ...(i === qs.length - 1 ? { footer } : {}),
-    actions: open ? (q.options ?? []).filter((o) => o.id && str(o.label)).map((o) => {
-      const picked = picks[q.id]?.optionId === o.id;
-      const action = `pick:${q.id}:${o.id}`;
-      return {
-        id: `q${i}${o.id}`.replace(/[^a-zA-Z0-9]/g, "").slice(0, 60), name: picked ? `✓ ${str(o.label)}` : str(o.label), type: "button", style: picked ? "primary" : "default",
-        integration: { url: d.actionUrl, context: { kind: "card", issueId: c.issueId, cardId: c.id, action, sig: sig(d.key, { issueId: c.issueId, cardId: c.id }, action) } },
-      };
-    }) : [],
+    actions: open ? [
+      ...(q.options ?? []).filter((o) => o.id && str(o.label)).map((o) => {
+        const picked = picks[q.id]?.optionId === o.id;
+        // Paperclip's "Type an answer" option stands for a text box: it opens one here too.
+        const action = o.freeText ? `text:${q.id}:${o.id}` : `pick:${q.id}:${o.id}`;
+        const label = o.freeText ? `${str(o.label)}…` : str(o.label);
+        return {
+          id: `q${i}${o.id}`.replace(/[^a-zA-Z0-9]/g, "").slice(0, 60), name: picked ? `✓ ${o.freeText ? picks[q.id].label.slice(0, 40) : label}` : label, type: "button", style: picked ? "primary" : "default",
+          integration: { url: d.actionUrl, context: { kind: "card", issueId: c.issueId, cardId: c.id, action, sig: sig(d.key, { issueId: c.issueId, cardId: c.id }, action) } },
+        };
+      }),
+      ...(q.allowOther && !(q.options ?? []).some((o) => o.freeText) ? [{
+        id: `q${i}other`, name: picks[q.id]?.optionId === "other" ? `✓ ${picks[q.id].label.slice(0, 40)}` : "Other…", type: "button", style: picks[q.id]?.optionId === "other" ? "primary" : "default",
+        integration: { url: d.actionUrl, context: { kind: "card", issueId: c.issueId, cardId: c.id, action: `text:${q.id}:other`, sig: sig(d.key, { issueId: c.issueId, cardId: c.id }, `text:${q.id}:other`) } },
+      }] : []),
+    ] : [],
   }));
   return { message, props: { attachments: blocks } };
 }
@@ -233,21 +251,53 @@ export class Cards {
     for (const id of new Set([t.postId, t.threadPostId])) if (id) await this.d.poster.patch(id, message, props).catch(() => {});
   }
 
-  /** A button click. Returns the text shown only to the clicker, if any. */
-  click(req: { user_id?: string; user_name?: string; context?: { issueId?: string; cardId?: string; action?: string; sig?: string } }): Promise<string | null> {
+  /**
+   * A button click, or a typed answer sent from the form a text button opened. Returns the text shown
+   * only to the clicker, if any.
+   */
+  click(req: ClickRequest): Promise<string | null> {
+    // A form must open within seconds of the click (its trigger id expires), so not behind a poll.
+    if (req.context?.action?.startsWith("text:") && req.submission === undefined) return this.openText(req);
     return this.serial(() => this.decide(req));
   }
 
-  private async decide(req: Parameters<Cards["click"]>[0]): Promise<string | null> {
+  private async openText(req: ClickRequest): Promise<string | null> {
     const d = this.d;
     const { issueId, cardId, action, sig: given } = req.context ?? {};
-    const isPick = typeof action === "string" && action.startsWith("pick:");
+    if (!issueId || !cardId || !action || given !== sig(d.key, { issueId, cardId }, action)) return "This button is not valid.";
+    if (!(await this.approver(req))) return NOT_APPROVER;
+    if (!req.trigger_id || !d.openDialog) return "Type your answer in Paperclip (the task link above): this Mattermost cannot open a form.";
+    const c = (await d.cards(issueId)).find((x) => x.id === cardId);
+    if (!c || c.status !== "pending") return "This question has already been answered.";
+    const q = (buttonQuestions(c) ?? []).find((x) => x.id === action.split(":")[1]);
+    await d.openDialog(req.trigger_id, {
+      callback_id: `card-text:${cardId}`,
+      title: "Your answer",
+      introduction_text: str(q?.prompt).slice(0, 3000),
+      elements: [{ display_name: "Answer", name: "answer", type: "textarea", max_length: 3000, optional: false }],
+      submit_label: "Send",
+      state: JSON.stringify(req.context),
+    });
+    return null;
+  }
+
+  private async approver(req: ClickRequest): Promise<string | undefined> {
+    const email = req.user_id ? (await this.d.poster.email(req.user_id))?.toLowerCase() : null;
+    return email ? this.d.approvers.get(email) : undefined;
+  }
+
+  private async decide(req: ClickRequest): Promise<string | null> {
+    const d = this.d;
+    const { issueId, cardId, action, sig: given } = req.context ?? {};
+    const typed = typeof action === "string" && action.startsWith("text:") ? str(req.submission?.answer) : "";
+    if (action?.startsWith("text:") && !typed) return "Type an answer first.";
+    const isPick = typeof action === "string" && (action.startsWith("pick:") || action.startsWith("text:"));
     if (!issueId || !cardId || (action !== "accept" && action !== "reject" && !isPick) || given !== sig(d.key, { issueId, cardId }, action!)) return "This button is not valid.";
     const email = req.user_id ? (await d.poster.email(req.user_id))?.toLowerCase() : null;
     const actor = email ? d.approvers.get(email) : undefined;
-    if (!actor) return "You are not set up to decide from Mattermost. Ask an admin to tick you under Approvers in the plugin settings.";
+    if (!actor) return NOT_APPROVER;
     const who = req.user_name ? `@${req.user_name}` : email!;
-    if (isPick) return this.pick(issueId, cardId, action!, actor, who);
+    if (isPick) return this.pick(issueId, cardId, action!, actor, who, typed);
     await d.respond(issueId, cardId, action, actor, `${action === "accept" ? "Accepted" : "Rejected"} from Mattermost by ${who}`);
     const posted = (await d.store.get<Posted>("cards:posted")) ?? {};
     const t = posted[cardId];
@@ -261,7 +311,7 @@ export class Cards {
   }
 
   /** One option picked; once every question has one, the answers go to the task as the picker's comment. */
-  private async pick(issueId: string, cardId: string, action: string, actor: string, who: string): Promise<string | null> {
+  private async pick(issueId: string, cardId: string, action: string, actor: string, who: string, typed = ""): Promise<string | null> {
     const d = this.d;
     const [, questionId, optionId] = action.split(":");
     const posted = (await d.store.get<Posted>("cards:posted")) ?? {};
@@ -270,12 +320,16 @@ export class Cards {
     if (!t || !c) return "This question is no longer open here.";
     if (c.status !== "pending" || t.sent) return "This question has already been answered.";
     const qs = buttonQuestions(c) ?? [];
-    const option = qs.find((q) => q.id === questionId)?.options?.find((o) => o.id === optionId);
+    const question = qs.find((q) => q.id === questionId);
+    const option = optionId === "other" && question?.allowOther ? { id: "other", label: "" } : question?.options?.find((o) => o.id === optionId);
     if (!option) return "That option is no longer on the question.";
-    t.picks = { ...t.picks, [questionId]: { optionId, label: str(option.label), by: who } };
+    t.picks = { ...t.picks, [questionId]: { optionId, label: typed || str(option.label), by: who, ...(typed ? { typed: true } : {}) } };
     if (qs.every((q) => t.picks![q.id])) {
       const title = str(c.title) || str(c.payload?.title) || "your question";
-      const lines = qs.map((q) => `- ${str(q.prompt)} **${t.picks![q.id].label}**`);
+      const lines = qs.map((q) => {
+        const p = t.picks![q.id];
+        return p.typed ? `- ${str(q.prompt)}\n\n  ${p.label.replace(/\n/g, "\n  ")}` : `- ${str(q.prompt)} **${p.label}**`;
+      });
       await d.comment(issueId, `Answer to "${title}" (question ${c.id}), sent from Mattermost:\n\n${lines.join("\n")}`, actor);
       t.sent = who;
     }
