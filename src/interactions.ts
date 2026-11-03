@@ -255,10 +255,19 @@ export class Cards {
    * A button click, or a typed answer sent from the form a text button opened. Returns the text shown
    * only to the clicker, if any.
    */
-  click(req: ClickRequest): Promise<string | null> {
+  async click(req: ClickRequest): Promise<string | null> {
     // A form must open within seconds of the click (its trigger id expires), so not behind a poll.
-    if (req.context?.action?.startsWith("text:") && req.submission === undefined) return this.openText(req);
+    if (req.submission === undefined && (req.context?.action?.startsWith("text:") || (await this.oldTextButton(req)))) return this.openText(req);
     return this.serial(() => this.decide(req));
+  }
+
+  /** A "Type an answer" button on a card posted before typed answers: it opened nothing and sent those words. */
+  private async oldTextButton(req: ClickRequest): Promise<boolean> {
+    const { issueId, cardId, action } = req.context ?? {};
+    if (!issueId || !cardId || !action?.startsWith("pick:")) return false;
+    const [, questionId, optionId] = action.split(":");
+    const c = (await this.d.cards(issueId).catch(() => [] as Card[])).find((x) => x.id === cardId);
+    return Boolean(c && (buttonQuestions(c) ?? []).find((q) => q.id === questionId)?.options?.find((o) => o.id === optionId)?.freeText);
   }
 
   private async openText(req: ClickRequest): Promise<string | null> {
@@ -289,8 +298,8 @@ export class Cards {
   private async decide(req: ClickRequest): Promise<string | null> {
     const d = this.d;
     const { issueId, cardId, action, sig: given } = req.context ?? {};
-    const typed = typeof action === "string" && action.startsWith("text:") ? str(req.submission?.answer) : "";
-    if (action?.startsWith("text:") && !typed) return "Type an answer first.";
+    const typed = req.submission !== undefined ? str(req.submission.answer) : "";
+    if (req.submission !== undefined && !typed) return "Type an answer first.";
     const isPick = typeof action === "string" && (action.startsWith("pick:") || action.startsWith("text:"));
     if (!issueId || !cardId || (action !== "accept" && action !== "reject" && !isPick) || given !== sig(d.key, { issueId, cardId }, action!)) return "This button is not valid.";
     const email = req.user_id ? (await d.poster.email(req.user_id))?.toLowerCase() : null;

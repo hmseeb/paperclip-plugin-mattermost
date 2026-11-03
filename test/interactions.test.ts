@@ -247,3 +247,19 @@ test("a question that allows another answer gets an Other button that opens the 
   await t.c.click({ user_id: "mm-sam", user_name: "sam", context: other, submission: { answer: "10:00 in Texas, 09:00 elsewhere" } });
   assert.match(t.comments[0].body, /10:00 in Texas, 09:00 elsewhere/);
 });
+
+test("an old card's \"Type an answer\" button opens the form instead of sending those words", async () => {
+  const t = setup();
+  await t.c.poll();
+  t.add({ id: "legacy", issueId: "i1", kind: "ask_user_questions", status: "pending", createdAt: later, createdByAgentId: "a-ceo",
+    payload: { questions: [{ id: "scope", prompt: "Which counts?", selectionMode: "single", options: [{ id: "paperclip_text_answer", label: "Type an answer", freeText: true }] }] } });
+  await t.c.poll();
+  const action = "pick:scope:paperclip_text_answer"; // as the button was before
+  const ctx = { kind: "card", issueId: "i1", cardId: "legacy", action, sig: sign(KEY, "card:i1:legacy", action) };
+  assert.equal(await t.c.click({ user_id: "mm-sam", trigger_id: "tr", context: ctx }), null);
+  assert.equal(t.dialogs.length, 1);
+  assert.equal(t.comments.length, 0, "nothing sent yet");
+  await t.c.click({ user_id: "mm-sam", user_name: "sam", context: ctx, submission: { answer: "Aggregate counts only." } });
+  assert.match(t.comments[0].body, /Aggregate counts only\./);
+  assert.doesNotMatch(t.comments[0].body, /Type an answer/);
+});
