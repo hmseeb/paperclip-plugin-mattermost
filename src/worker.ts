@@ -207,6 +207,7 @@ class Tenant {
       respond: async (issueId, cardId, action, actorUserId, reason) => { await ctx.issues.respondInteraction(issueId, cardId, { action, actorUserId, reason }, companyId); },
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
       agentName, store, actionUrl, key, paperclipUrl, channelFor, approvers,
+      threadOf: (issueId) => store.get<{ channelId: string; rootId: string; agentId?: string }>(`issuethread:${issueId}`),
     }) : null;
     const poster = this.poster(manager, roster);
     const actions = new Actions({

@@ -1,5 +1,6 @@
 // Decision cards agents raise on Paperclip tasks ("issue-thread interactions"),
-// mirrored into the raising agent's decisions channel (its own, else the approvals channel). Confirmations and suggested tasks get Accept /
+// mirrored into the raising agent's decisions channel (its own, else the approvals channel), and into the
+// Mattermost thread the task was asked for in, where the person is waiting. Confirmations and suggested tasks get Accept /
 // Reject buttons; a click is resolved as the clicker's Paperclip user. Questions get a
 // button per option; plugins cannot submit answers to a question card, so once every
 // question has a pick the answers are posted on the task as a comment from the person
@@ -36,13 +37,15 @@ export interface CardDeps {
   key: string;
   paperclipUrl: string;
   channelFor: ChannelFor;
+  /** The Mattermost thread a task was asked for in, and the agent that thread is with. */
+  threadOf(issueId: string): Promise<{ channelId: string; rootId: string; agentId?: string } | null>;
   approvers: Map<string, string>;
   now?: () => Date;
 }
 
 interface Picked { optionId: string; label: string; by: string }
 /** A posted card; for questions, the picks so far and who sent the answers. */
-interface Tracked { postId: string; issueId: string; by?: string; picks?: Record<string, Picked>; sent?: string }
+interface Tracked { postId: string; issueId: string; by?: string; picks?: Record<string, Picked>; sent?: string; /** The same card in the thread the task was asked for in. */ threadPostId?: string }
 interface Question { id: string; prompt?: string; helpText?: string; selectionMode?: string; allowOther?: boolean; options?: { id: string; label?: string }[] }
 
 /** Questions answerable with buttons: every one single-choice with options to click. */
@@ -179,13 +182,29 @@ export class Cards {
       for (const c of await d.cards(issue.id)) {
         seen.add(c.id);
         if (posted[c.id]) {
-          if (c.status !== "pending") { await this.close(c, posted[c.id]); delete posted[c.id]; }
+          if (c.status !== "pending") { await this.close(c, posted[c.id]); delete posted[c.id]; continue; }
+          // Posted before it was also sent to threads (or before the thread was known): copy it there once.
+          const t = posted[c.id];
+          if (!t.threadPostId) {
+            const thread = await d.threadOf(issue.id);
+            const agentId = c.createdByAgentId ?? issue.assigneeAgentId ?? null;
+            if (thread && thread.channelId !== (await home(agentId))?.channelId) {
+              const { message, props } = renderCard(c, issue, d.agentName(agentId), d, undefined, t);
+              t.threadPostId = await d.poster.post(thread.agentId ?? agentId, { channelId: thread.channelId, rootId: thread.rootId }, message, props);
+            }
+          }
         } else if (c.status === "pending" && new Date(c.createdAt).getTime() > Date.parse(since)) {
           const agentId = c.createdByAgentId ?? issue.assigneeAgentId ?? null;
           const where = await home(agentId);
-          if (!where) continue; // no channel to post in: tried again on the next pass
+          // Also where the person is waiting: the thread the task was asked for in, posted by the agent that
+          // thread is with (another agent's bot cannot post in that DM).
+          const thread = await d.threadOf(issue.id);
+          if (!where && !thread) continue; // nowhere to post: tried again on the next pass
           const { message, props } = renderCard(c, issue, d.agentName(agentId), d);
-          posted[c.id] = { postId: await d.poster.post(agentId, { channelId: where.channelId, rootId: "" }, where.note ? `${message}\n_${where.note}_` : message, props), issueId: issue.id };
+          const inThread = thread && thread.channelId !== where?.channelId
+            ? await d.poster.post(thread.agentId ?? agentId, { channelId: thread.channelId, rootId: thread.rootId }, message, props) : undefined;
+          const postId = where ? await d.poster.post(agentId, { channelId: where.channelId, rootId: "" }, where.note ? `${message}\n_${where.note}_` : message, props) : inThread!;
+          posted[c.id] = { postId, issueId: issue.id, ...(inThread ? { threadPostId: inThread } : {}) };
         }
       }
     }
@@ -203,7 +222,11 @@ export class Cards {
     const issue = this.issues.get(c.issueId) ?? { id: c.issueId, title: "task" };
     const by = t.by ?? t.sent ?? [...d.approvers].find(([, id]) => id === c.resolvedByUserId)?.[0];
     const { message, props } = renderCard(c, issue, d.agentName(c.createdByAgentId ?? null), d, by, t);
-    await d.poster.patch(t.postId, message, props);
+    await this.patchAll(t, message, props);
+  }
+
+  private async patchAll(t: Tracked, message: string, props: Record<string, unknown>): Promise<void> {
+    for (const id of new Set([t.postId, t.threadPostId])) if (id) await this.d.poster.patch(id, message, props).catch(() => {});
   }
 
   /** A button click. Returns the text shown only to the clicker, if any. */
@@ -256,7 +279,7 @@ export class Cards {
     await d.store.set("cards:posted", posted);
     const issue = this.issues.get(issueId) ?? { id: issueId, title: "task" };
     const { message, props } = renderCard(c, issue, d.agentName(c.createdByAgentId ?? issue.assigneeAgentId ?? null), d, undefined, t);
-    await d.poster.patch(t.postId, message, props);
+    await this.patchAll(t, message, props);
     return null;
   }
 }

@@ -8,19 +8,19 @@ const T0 = "2026-10-28T00:00:00.000Z";
 const later = "2026-10-28T01:00:00.000Z";
 const before = "2026-10-27T23:00:00.000Z";
 
-function setup(perAgent: Record<string, string> = {}) {
+function setup(perAgent: Record<string, string> = {}, threads: Record<string, { channelId: string; rootId: string; agentId?: string }> = {}) {
   const issues: OpenIssue[] = [{ id: "i1", identifier: "BAD-9", title: "Launch site", assigneeAgentId: "a-cto" }];
   const byIssue = new Map<string, Card[]>([["i1", [
     { id: "old", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: before, payload: { prompt: "Old?" } },
   ]]]);
-  const posts: { id: string; as: string | null; channelId: string; message: string; props: any }[] = [];
+  const posts: { id: string; as: string | null; channelId: string; rootId?: string; message: string; props: any }[] = [];
   const responses: unknown[] = [];
   const comments: { issueId: string; body: string; actor: string }[] = [];
   const state = new Map<string, unknown>();
   const channel = async (name: string) => (name === "decisions" ? "c-dec" : name === "client-reporting" ? "c-reports" : null);
   const c = new Cards({
     poster: {
-      async post(agentId, where, message, props) { const id = `p${posts.length + 1}`; posts.push({ id, as: agentId, channelId: where.channelId, message, props }); return id; },
+      async post(agentId, where, message, props) { const id = `p${posts.length + 1}`; posts.push({ id, as: agentId, channelId: where.channelId, rootId: where.rootId, message, props }); return id; },
       async patch(postId, message, props) { Object.assign(posts.find((p) => p.id === postId)!, { message, props }); },
       channel,
       async email(uid) { return uid === "mm-sam" ? "sam@example.com" : null; },
@@ -35,7 +35,7 @@ function setup(perAgent: Record<string, string> = {}) {
     async comment(issueId, body, actor) { comments.push({ issueId, body, actor }); },
     agentName: (id) => (id === "a-ceo" ? "CEO" : "CTO"),
     store: { async get<T>(k: string) { return (state.get(k) ?? null) as T | null; }, async set(k, v) { state.set(k, v); } },
-    actionUrl: "https://pc/hook", key: KEY, paperclipUrl: "https://pc", channelFor: decisionChannels({ channel }, perAgent, "decisions"),
+    actionUrl: "https://pc/hook", key: KEY, paperclipUrl: "https://pc", channelFor: decisionChannels({ channel }, perAgent, "decisions"), threadOf: async (id) => threads[id] ?? null,
     approvers: new Map([["sam@example.com", "u-sam"]]),
     now: () => new Date(T0),
   });
@@ -166,4 +166,34 @@ test("a card goes to the channel of the agent that raised it, others to the deci
   t.add({ id: "r2", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Ship?" } });
   await t.c.poll();
   assert.deepEqual(t.posts.map((p) => [p.as, p.channelId]), [["a-reporting", "c-reports"], ["a-ceo", "c-dec"]]);
+});
+
+test("a card on a task asked for in a thread is also posted in that thread, by the agent the thread is with; one click updates both", async () => {
+  const t = setup({}, { i1: { channelId: "dm-reporting", rootId: "root-r", agentId: "a-reporting" } });
+  await t.c.poll();
+  t.add({ id: "b1", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Bind GHL_TOKEN to Client Reporting?" } });
+  await t.c.poll();
+  assert.deepEqual(t.posts.map((p) => [p.as, p.channelId, p.rootId]), [["a-reporting", "dm-reporting", "root-r"], ["a-ceo", "c-dec", ""]]);
+  const btn = t.posts[0].props.attachments[0].actions[0].integration.context;
+  await t.c.click({ user_id: "mm-sam", user_name: "sam", context: btn });
+  for (const p of t.posts) assert.match(p.props.attachments[0].footer, /Accepted by @sam/);
+});
+
+test("a card posted before threads got copies is copied to its thread once; a thread in the decisions channel gets no second copy", async () => {
+  const threads: Record<string, { channelId: string; rootId: string; agentId?: string }> = {};
+  const t = setup({}, threads);
+  await t.c.poll();
+  t.add({ id: "b2", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Old card" } });
+  await t.c.poll();
+  assert.equal(t.posts.length, 1, "no thread known yet");
+  threads.i1 = { channelId: "dm-reporting", rootId: "root-r", agentId: "a-reporting" };
+  await t.c.poll();
+  await t.c.poll();
+  assert.deepEqual(t.posts.map((p) => p.channelId), ["c-dec", "dm-reporting"]);
+  const u = setup({}, { i1: { channelId: "c-dec", rootId: "root-x", agentId: "a-reporting" } });
+  await u.c.poll();
+  u.add({ id: "b3", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Here" } });
+  await u.c.poll();
+  await u.c.poll();
+  assert.equal(u.posts.length, 1);
 });
