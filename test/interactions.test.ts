@@ -197,3 +197,15 @@ test("a card posted before threads got copies is copied to its thread once; a th
   await u.c.poll();
   assert.equal(u.posts.length, 1);
 });
+
+test("a card already in the decisions channel is copied to its thread only if it is under a day old", async () => {
+  const threads: Record<string, { channelId: string; rootId: string; agentId?: string }> = {};
+  const t = setup({}, threads);
+  await t.c.poll();
+  t.add({ id: "old1", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Old" } });
+  await t.c.poll();
+  threads.i1 = { channelId: "dm-reporting", rootId: "root-r", agentId: "a-reporting" };
+  (t.c as unknown as { d: { now: () => Date } }).d.now = () => new Date(Date.parse(later) + 2 * 24 * 60 * 60 * 1000);
+  await t.c.poll();
+  assert.deepEqual(t.posts.map((p) => p.channelId), ["c-dec"], "two days old: left in the channel");
+});

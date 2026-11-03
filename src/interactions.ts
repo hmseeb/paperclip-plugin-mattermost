@@ -60,6 +60,9 @@ type Posted = Record<string, Tracked>;
 const ANSWERABLE = new Set(["request_confirmation", "suggest_tasks"]);
 const OUTCOME: Record<string, string> = { accepted: ":white_check_mark: Accepted", rejected: ":x: Rejected", answered: ":white_check_mark: Answered", expired: "Expired", cancelled: "Withdrawn" };
 
+/** How old a card already in the decisions channel may be and still be copied to its thread. */
+const CATCH_UP_MS = 24 * 60 * 60 * 1000;
+
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const sig = (key: string, c: { issueId: string; cardId: string }, action: string) => sign(key, `card:${c.issueId}:${c.cardId}`, action);
 
@@ -183,9 +186,10 @@ export class Cards {
         seen.add(c.id);
         if (posted[c.id]) {
           if (c.status !== "pending") { await this.close(c, posted[c.id]); delete posted[c.id]; continue; }
-          // Posted before it was also sent to threads (or before the thread was known): copy it there once.
+          // Posted before it was also sent to threads (or before the thread was known): copy it there once,
+          // if it is recent; an old card turning up in an old thread surprises more than it helps.
           const t = posted[c.id];
-          if (!t.threadPostId) {
+          if (!t.threadPostId && now.getTime() - new Date(c.createdAt).getTime() < CATCH_UP_MS) {
             const thread = await d.threadOf(issue.id);
             const agentId = c.createdByAgentId ?? issue.assigneeAgentId ?? null;
             if (thread && thread.channelId !== (await home(agentId))?.channelId) {
