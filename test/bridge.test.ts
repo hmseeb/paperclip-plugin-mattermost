@@ -433,3 +433,10 @@ test("a resumed reply is given the message it was answering", async () => {
   assert.match(t.prompts.find((p) => p.sessionId === "s7")?.prompt ?? "", /The message you were answering:\n@cto check the DNS/);
   assert.equal(t.posts.at(-1)?.message, "DNS is fine.");
 });
+
+test("the thread an agent is answering records the person who asked, not another agent", async () => {
+  let seen: unknown = null;
+  const t = setup({ reply: async () => { seen = t.bridge.activeThread("a-cto"); return "ok"; } });
+  await t.handle(evt("@cto check this", { id: "pa", user_id: "alice" }));
+  assert.deepEqual(seen, { channelId: "c1", rootId: "pa", askedBy: "alice" });
+});

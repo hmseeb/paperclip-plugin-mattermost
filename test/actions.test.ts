@@ -239,3 +239,35 @@ test("a task marked done with its answer in the same call reports the answer, th
   assert.equal(posts.length, 1);
   assert.match(posts[0], /^Nov 2 notes: decisions A and B; Dan owns the follow-up\.\n\n:white_check_mark: Done: \*\*BAD-1056\*\*/);
 });
+
+test("nudging a task from a chat: written as the person being answered, labelled, only for open tasks", async () => {
+  const mm = fakeMm();
+  const comments: { issueId: string; body: string; actor: string }[] = [];
+  let askedBy: string | undefined = "mm-haseeb";
+  const tasks: Record<string, { id: string; identifier: string; title: string; status: string }> = {
+    "BAD-1127": { id: "i-1127", identifier: "BAD-1127", title: "Change Railway domain", status: "blocked" },
+    "BAD-9": { id: "i-9", identifier: "BAD-9", title: "Old", status: "done" },
+  };
+  const actions = new Actions({
+    bot: () => mm.client("bot-cto"), manager: mm.client("mgr"),
+    agents: () => [{ agentId: "a-cto", agentName: "CTO", username: "cto", botUserId: "bot-cto" }],
+    canTalk: async () => true,
+    origin: () => ({ channelId: CH, rootId: "r", ...(askedBy ? { askedBy } : {}) }),
+    task: async (id) => tasks[id] ?? null,
+    person: async (id) => ({ userId: id === "mm-haseeb" ? "u-haseeb" : null, username: id.replace("mm-", "") }),
+    comment: async (issueId, body, actor) => { comments.push({ issueId, body, actor }); },
+    askApproval: async () => {}, store: { get: async () => null, set: async () => {} }, newId: () => "x",
+  });
+  const nudge = (task: string, message: string) => actions.handle("a-cto", "nudge", { task }, { message });
+  assert.equal((await nudge("BAD-1127", "")).status, 400);
+  const r = await nudge("BAD-1127", "Railway and Cloudflare access added; continue.");
+  assert.equal(r.status, 200);
+  assert.deepEqual(comments, [{ issueId: "i-1127", actor: "u-haseeb", body: "**From Mattermost, relayed by CTO on behalf of @haseeb:**\n\nRailway and Cloudflare access added; continue." }]);
+  assert.equal((await nudge("BAD-9", "again")).status, 409, "a done task is not restarted by a comment");
+  assert.equal((await nudge("BAD-404", "x")).status, 404);
+  askedBy = "mm-stranger";
+  assert.equal((await nudge("BAD-1127", "x")).status, 403, "not linked to a Paperclip account");
+  askedBy = undefined;
+  assert.equal((await nudge("BAD-1127", "x")).status, 409, "not answering a person (another agent asked, or no chat)");
+  assert.equal(comments.length, 1);
+});

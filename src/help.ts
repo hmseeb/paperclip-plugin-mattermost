@@ -34,6 +34,11 @@ tell whoever you are working with and carry on. A 403 says why something is not 
   checking what shipped this morning") and then do the work.
 - Do not write @channel, @all or @here unless everyone in the channel must be notified: it needs
   approval.
+- **Changing a task from a chat.** While you answer someone in Mattermost you are not in a task run,
+  so Paperclip refuses your task updates and comments ("no valid heartbeat run" / cross-issue). Do not
+  retry them. Nudge the task instead (below): your message is posted on it as a comment in the name of
+  the person you are answering, labelled as relayed by you, and Paperclip wakes the task's agent,
+  which then does the change in its own run (reopen, continue, retry).
 
 ## While you work
 
@@ -67,6 +72,8 @@ Channels (POST, JSON body):
 - /mm/channels/{channel}/invite  {"people": [...], "agents": [...]}   free on channels you created
 - /mm/channels/{channel}/update  {"purpose": "...", "header": "...", "name": "..."}  yours only
 - /mm/channels/{channel}/archive {}                                   yours only
+- /mm/tasks/{task}/nudge         {"message": "Railway and Cloudflare access added; continue"}
+  only while answering a person in Mattermost; {task} is its number (BAD-1127) or id
 
 {channel} is a channel's id, its URL name (inc-checkout-5xx) or its display name.
 `;

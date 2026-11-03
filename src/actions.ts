@@ -26,10 +26,14 @@ export interface ActionDeps {
   taskThread?(agentId: string, runId: string | null, channelId: string): Promise<string | null>;
   /** Agents' own posts and DMs as people should see them (Paperclip links made clickable). */
   format?(text: string): string;
-  /** The thread the agent is answering right now, where results and requests are reported. */
-  origin(agentId: string): { channelId: string; rootId: string } | null;
+  /** The thread the agent is answering right now, where results and requests are reported, and who asked. */
+  origin(agentId: string): { channelId: string; rootId: string; askedBy?: string } | null;
   /** A Paperclip task of this company, or null. */
-  task(taskId: string): Promise<{ id: string; identifier?: string | null; title: string } | null>;
+  task(taskId: string): Promise<{ id: string; identifier?: string | null; title: string; status?: string } | null>;
+  /** The Paperclip user a Mattermost person is (by the emails in the plugin settings), and their username. */
+  person?(mattermostUserId: string): Promise<{ userId: string | null; username: string }>;
+  /** A comment on a task written as a person: Paperclip wakes the task's agent for it. */
+  comment?(issueId: string, body: string, actorUserId: string): Promise<void>;
   /** Posts an Approve / Reject card for a request; returns nothing, the card carries the id. */
   askApproval(request: PendingRequest): Promise<void>;
   store: { get<T>(k: string): Promise<T | null>; set(k: string, v: unknown): Promise<void> };
@@ -93,6 +97,7 @@ export class Actions {
         case "invite": return await this.invite(agentId, bot, params.channel, input);
         case "update-channel": return await this.updateChannel(agentId, bot, params.channel, input);
         case "archive": return await this.archive(agentId, bot, params.channel);
+        case "nudge": return await this.nudge(agentId, params.task, input);
         case "request": return ok(await this.d.store.get<PendingRequest>(`req:${params.id}`) ?? { error: "no such request" });
         default: return bad(404, `unknown action ${routeKey}`);
       }
@@ -236,6 +241,30 @@ export class Actions {
     const channel = await bot.request<{ id: string }>("POST", "/channels/direct", [bot.botUserId, user.id]);
     const threadId = str(input.threadId) || (await this.d.taskThread?.(agentId, this.runId, channel.id).catch(() => null)) || "";
     return ok(await this.doPost(bot, channel.id, threadId, text));
+  }
+
+  // ---- nudging a task ------------------------------------------------------------------
+
+  /**
+   * A chat turn cannot change tasks (Paperclip ties every task change to the task a run works on). What a
+   * person can do, it can relay: a comment on the task written as the person the agent is answering,
+   * labelled as relayed, which wakes the task's agent in a proper task run.
+   */
+  private async nudge(agentId: string, ref: string, input: Record<string, unknown>): Promise<Result> {
+    const message = str(input.message);
+    if (!message) return bad(400, "message is required: what the task's agent should know or do");
+    if (message.length > 4000) return bad(400, "message is too long (4000 characters at most)");
+    const asked = this.d.origin(agentId)?.askedBy;
+    if (!asked) return bad(409, "You can only nudge a task while answering a person in Mattermost; it is written in their name.");
+    if (!this.d.person || !this.d.comment) return bad(501, "Nudging tasks is not available here.");
+    const who = await this.d.person(asked);
+    if (!who.userId) return bad(403, `@${who.username} is not linked to a Paperclip account in the Mattermost plugin settings (approvers or people who can talk to agents), so nothing can be written in their name. Ask them to comment on the task in Paperclip.`);
+    const task = await this.d.task(ref);
+    if (!task) return bad(404, `no task ${ref} in this company`);
+    if (task.status === "done" || task.status === "cancelled") return bad(409, `${task.identifier ?? ref} is ${task.status}; a comment does not restart it. Ask the person to reopen it in Paperclip, or create a new task.`);
+    const agent = this.d.agents().find((a) => a.agentId === agentId)?.agentName ?? "an agent";
+    await this.d.comment(task.id, `**From Mattermost, relayed by ${agent} on behalf of @${who.username}:**\n\n${message}`, who.userId);
+    return ok({ nudged: task.identifier ?? task.id, as: `@${who.username}`, next: "The task's agent is woken for this comment (unless the task waits on another unfinished task). Its result comes back to the thread it was asked for in." });
   }
 
   // ---- channels ----------------------------------------------------------------------

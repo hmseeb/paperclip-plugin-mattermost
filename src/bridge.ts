@@ -145,7 +145,7 @@ export function splitMessage(text: string, max = MAX_POST): string[] {
 export class Bridge {
   private queues = new Map<string, Promise<void>>();
   private seen = new Set<string>();
-  private active = new Map<string, { channelId: string; rootId: string }>();
+  private active = new Map<string, { channelId: string; rootId: string; askedBy?: string }>();
   private roster: () => Roster;
   private directory: Directory;
   private agents: Agents;
@@ -234,7 +234,7 @@ export class Bridge {
   }
 
   /** The thread an agent is answering right now, for posts its run causes (approvals). */
-  activeThread(agentId: string): { channelId: string; rootId: string } | null {
+  activeThread(agentId: string): { channelId: string; rootId: string; /** The person (Mattermost user) being answered; absent when another agent asked. */ askedBy?: string } | null {
     return this.active.get(agentId) ?? null;
   }
 
@@ -366,7 +366,7 @@ export class Bridge {
     const outbox = this.files ? await this.files.outbox(post.id).catch(() => null) : null;
     const fromAgent = this.roster().isBot(post.user_id);
     const prompt = `${sender.displayName} (@${sender.username}${fromAgent ? ", another agent" : ""}) wrote to you (@${member.username}) in ${where} on Mattermost. Your reply is posted back there, so answer in Markdown. ` +
-      `Work within Paperclip tasks: if the message asks you to do something (anything more than answering a quick question), first create a Paperclip task for it, assigned to yourself or to the agent it belongs with, and reply here with the task's number, what will happen, and that the result will come back to this thread. Creating the task starts its own run, which does the work: after replying, end this chat turn without starting the work yourself (no computer, code or other tools for it), or the two runs collide and duplicate everything. The task run finishes with the outcome as the task's last comment: when the task is done, cancelled or blocked, that comment is posted back here. Quick questions you can answer directly. ` +
+      `Work within Paperclip tasks: if the message asks you to do something (anything more than answering a quick question), first create a Paperclip task for it, assigned to yourself or to the agent it belongs with, and reply here with the task's number, what will happen, and that the result will come back to this thread. Creating the task starts its own run, which does the work: after replying, end this chat turn without starting the work yourself (no computer, code or other tools for it), or the two runs collide and duplicate everything. The task run finishes with the outcome as the task's last comment: when the task is done, cancelled or blocked, that comment is posted back here. Quick questions you can answer directly. From this chat Paperclip refuses task updates and comments (no task run); to restart, unblock or redirect a task, nudge it instead: POST <your Paperclip API URL>/api/plugins/mattermost-bridge/api/mm/tasks/<task>/nudge with {"message": ...} posts your message on it in the person's name and wakes its agent. ` +
       `To offer choices, end your reply with one line \`choices: First | Second\` (2 to ${MAX_CHOICES} short options); they are shown as buttons, and the pick comes back as the next message. ` +
       `You can also read channels, post, message people, mention other agents and open work channels in Mattermost: GET <your Paperclip API URL>/api/plugins/mattermost-bridge/api/mm/help shows how. ` +
       `If this takes more than a minute or two, check GET …/api/plugins/mattermost-bridge/api/mm/inbox between steps: it returns anything people write in this thread meanwhile (a correction, "stop", "never mind"); act on it then, as it is not sent to you again.` +
@@ -375,7 +375,7 @@ export class Bridge {
       (outbox ? `\n\nTo send files back with your reply, save them in ${outbox}` : "");
 
     let reply: string | null;
-    const here = { channelId: post.channel_id, rootId };
+    const here = { channelId: post.channel_id, rootId, ...(fromAgent ? {} : { askedBy: post.user_id }) };
     this.active.set(member.agentId, here);
     try {
       let sessionId = thread && thread.agentId === member.agentId ? thread.sessionId : null;

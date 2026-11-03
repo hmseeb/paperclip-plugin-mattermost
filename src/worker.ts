@@ -211,6 +211,11 @@ class Tenant {
       openDialog: async (triggerId, dialog) => { await manager.request("POST", "/actions/dialogs/open", { trigger_id: triggerId, url: actionUrl, dialog }); },
     }) : null;
     const poster = this.poster(manager, roster);
+    // Paperclip people as Mattermost accounts, by the emails the settings know (approvers, people who can talk to agents).
+    const people = new Map<string, { email: string; name?: string }>();
+    for (const p of [...(Array.isArray(config.allowedUsers) ? config.allowedUsers : []), ...(Array.isArray(config.approvers) ? config.approvers : [])] as { userId?: string; email?: string; name?: string }[]) {
+      if (p?.userId && p.email) people.set(p.userId, { email: p.email.toLowerCase(), name: p.name });
+    }
     const actions = new Actions({
       bot: (agentId) => roster.clientOf(agentId),
       manager,
@@ -227,6 +232,12 @@ class Tenant {
         return at && at.channelId === channelId ? at.rootId : null;
       },
       task: async (taskId) => (await ctx.issues.get(taskId, companyId)) as never,
+      person: async (mmUserId) => {
+        const u = await manager.request<{ email?: string; username: string }>("GET", `/users/${mmUserId}`);
+        const email = (u.email ?? "").toLowerCase();
+        return { userId: [...people].find(([, p]) => p.email === email)?.[0] ?? null, username: u.username };
+      },
+      comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
       askApproval: async (req) => {
         if (!paperclipUrl || !approvers.size) throw Object.assign(new Error("this needs a person's approval, and nobody can approve from Mattermost yet (the plugin needs its Paperclip public URL and approvers set)"), { status: 403 });
         const { message, props } = requestCard(req, actionUrl, key);
@@ -252,11 +263,6 @@ class Tenant {
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
       comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId, createdAt: c.createdAt })),
     });
-    // Paperclip people as Mattermost accounts, by the emails the settings know (approvers, people who can talk to agents).
-    const people = new Map<string, { email: string; name?: string }>();
-    for (const p of [...(Array.isArray(config.allowedUsers) ? config.allowedUsers : []), ...(Array.isArray(config.approvers) ? config.approvers : [])] as { userId?: string; email?: string; name?: string }[]) {
-      if (p?.userId && p.email) people.set(p.userId, { email: p.email.toLowerCase(), name: p.name });
-    }
     const auto = new AutoChannels({
       store,
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
