@@ -6,12 +6,16 @@ import type { WorkLink } from "./actions.ts";
 
 export const FROM_PAPERCLIP = { from_paperclip: "true" };
 const CLOSED = new Set(["done", "cancelled"]);
+/** Mattermost refuses posts over 16383 characters. */
+const MAX_POST = 15000;
+/** A comment this recent counts as written with the status change. */
+const FRESH_MS = 15_000;
 const THREAD_REPORTS: Record<string, string> = { done: ":white_check_mark: Done:", cancelled: ":no_entry_sign: Cancelled:", blocked: ":pause_button: Blocked:" };
 const STATUS_WORDS: Record<string, string> = {
   todo: "to do", in_progress: "in progress", in_review: "in review", blocked: "blocked", backlog: "in the backlog", done: "done", cancelled: "cancelled",
 };
 
-export interface TaskComment { id: string; body: string; authorAgentId?: string | null }
+export interface TaskComment { id: string; body: string; authorAgentId?: string | null; createdAt?: string | Date }
 export interface WorkDeps {
   store: { get<T>(k: string): Promise<T | null>; set(k: string, v: unknown): Promise<void> };
   /** Posts as the agent's bot (null: the linked agent's). */
@@ -22,6 +26,7 @@ export interface WorkDeps {
   channelName(channelId: string): Promise<string>;
   task(issueId: string): Promise<{ identifier?: string | null; title: string; status: string; assigneeAgentId?: string | null } | null>;
   comments(issueId: string): Promise<TaskComment[]>;
+  sleep?(ms: number): Promise<void>;
 }
 
 type Linked = WorkLink & { status?: string; closed?: boolean };
@@ -85,15 +90,33 @@ export class WorkLinks {
     const by = [at.agentId, task.assigneeAgentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
     if (!by) return;
     await this.d.store.set(`issuethread:${issueId}`, { ...at, status: task.status });
-    const last = (await this.d.comments(issueId)).at(-1)?.body?.trim();
-    const outcome = last ? `\n\n${last.length > 3000 ? last.slice(0, 3000) + "…" : last}` : "";
+    const last = (await this.finalComment(issueId))?.body?.trim();
     const doer = task.assigneeAgentId && task.assigneeAgentId !== by ? ` _(by ${this.d.agentName(task.assigneeAgentId)})_` : "";
+    const status = `${THREAD_REPORTS[task.status]} **${task.identifier ?? "The task"}** ${task.title}${doer}`;
+    // The agent's answer as written on the task, then one line saying where it stands.
+    const text = last ? `${last.length > MAX_POST ? last.slice(0, MAX_POST) + "…" : last}\n\n${status}` : status;
     try {
-      await this.d.post(by, at.channelId, at.rootId, `${THREAD_REPORTS[task.status]} **${task.identifier ?? "The task"}** ${task.title}${doer}${outcome}`);
+      await this.d.post(by, at.channelId, at.rootId, text);
     } catch (err) {
       await this.d.store.set(`issuethread:${issueId}`, at); // not reported: the next update tries again
       throw err;
     }
+  }
+
+  /**
+   * The task's last comment, waiting a few seconds for one written with the status change: an agent
+   * finishing with "done + comment" in one call has the status saved (and announced) before the comment.
+   */
+  private async finalComment(issueId: string): Promise<TaskComment | undefined> {
+    const changedAt = Date.now() - FRESH_MS;
+    const fresh = (c?: TaskComment) => Boolean(c?.createdAt && new Date(c.createdAt).getTime() >= changedAt);
+    const sleep = this.d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    let list = await this.d.comments(issueId);
+    for (let i = 0; i < 8 && !fresh(list.at(-1)); i++) {
+      await sleep(1000);
+      list = await this.d.comments(issueId);
+    }
+    return list.at(-1);
   }
 
   /** The task changed: note a new status; on done or cancelled, archive and report back. */
@@ -116,7 +139,7 @@ export class WorkLinks {
     }
     link.closed = true;
     await this.d.store.set(`worklink:${channelId}`, link);
-    const last = (await this.d.comments(issueId)).at(-1)?.body?.trim();
+    const last = (await this.finalComment(issueId))?.body?.trim();
     const outcome = last ? `\n\n${last.length > 1500 ? last.slice(0, 1500) + "…" : last}` : "";
     const done = task.status === "done";
     const name = await this.d.channelName(channelId).catch(() => "the work channel");

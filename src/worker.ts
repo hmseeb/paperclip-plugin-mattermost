@@ -249,7 +249,7 @@ class Tenant {
       archive: async (channelId) => { await manager.request("DELETE", `/channels/${channelId}`); },
       channelName: async (channelId) => (await manager.request<{ display_name: string }>("GET", `/channels/${channelId}`)).display_name,
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
-      comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId })),
+      comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId, createdAt: c.createdAt })),
     });
     // Paperclip people as Mattermost accounts, by the emails the settings know (approvers, people who can talk to agents).
     const people = new Map<string, { email: string; name?: string }>();
