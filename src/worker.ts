@@ -258,6 +258,9 @@ class Tenant {
       },
       store, newId: () => randomUUID(),
     });
+    // Paperclip lists a task's comments newest first; everything here reads them oldest first (last = latest).
+    const oldestFirst = async (issueId: string) => (await ctx.issues.listComments(issueId, companyId))
+      .slice().sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     const work = new WorkLinks({
       store,
       post: async (agentId, channelId, rootId, text) => {
@@ -269,12 +272,12 @@ class Tenant {
       agentName: (agentId) => agentName(agentId),
       channelName: async (channelId) => (await manager.request<{ display_name: string }>("GET", `/channels/${channelId}`)).display_name,
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
-      comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId, createdAt: c.createdAt })),
+      comments: async (issueId) => (await oldestFirst(issueId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId, createdAt: c.createdAt })),
     });
     const auto = new AutoChannels({
       store,
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
-      comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ body: c.body })),
+      comments: async (issueId) => (await oldestFirst(issueId)).map((c) => ({ body: c.body })),
       hasBot: (agentId) => Boolean(roster.clientOf(agentId)),
       agentName: (agentId) => agentName(agentId),
       people: () => [...people].map(([userId, p]) => ({ userId, names: [p.name ?? "", (p.name ?? "").split(/\s+/)[0], p.email.split("@")[0]].filter(Boolean) })),
