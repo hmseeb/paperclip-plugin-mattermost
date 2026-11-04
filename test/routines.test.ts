@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lateBy, RoutineReports, type RoutineTask } from "../src/routines.ts";
+import { missedRun, RoutineReports, type RoutineTask } from "../src/routines.ts";
 
 const H = 3_600_000, DAY = 24 * H;
 
@@ -66,23 +66,26 @@ test("other tasks, agents with no channel and failed posts", async () => {
   assert.match(f.posts[0].text, /needs a person/);
 });
 
-test("lateBy: a steady routine overdue by an eighth of its interval; not before, not irregular ones, not long-stopped ones", () => {
-  const daily = [0, 1, 2, 3].map((d) => d * DAY);
-  assert.equal(lateBy(daily, 4 * DAY + 2 * H), null, "2 hours late: not yet");
-  assert.deepEqual(lateBy(daily, 4 * DAY + 4 * H), { interval: DAY, last: 3 * DAY });
-  assert.equal(lateBy(daily.slice(0, 3), 5 * DAY), null, "too few runs to know its rhythm");
-  assert.equal(lateBy([0, DAY, 3 * DAY, 4 * DAY], 6 * DAY), null, "irregular");
-  assert.equal(lateBy(daily, 7 * DAY), null, "idle for over three intervals: stopped on purpose");
-  const hourly = [0, 1, 2, 3, 4].map((h) => h * H);
-  assert.equal(lateBy(hourly, 5.5 * H), null, "at least an hour late");
-  assert.ok(lateBy(hourly, 6.1 * H));
+const W = 7 * DAY;
+test("missedRun: a run made at this time the last two weeks, not made now", () => {
+  const daily = Array.from({ length: 15 }, (_, d) => d * DAY); // days 0..14
+  assert.equal(missedRun(daily, 15 * DAY + 1 * H), null, "within the grace");
+  assert.equal(missedRun(daily, 15 * DAY + 3 * H), 15 * DAY);
+  assert.equal(missedRun([...daily, 15 * DAY + H], 15 * DAY + 5 * H), null, "ran an hour late (clock change): fine");
+  assert.equal(missedRun(daily.slice(7), 15 * DAY + 3 * H), null, "only one week of history");
+  assert.equal(missedRun([0], W + 3 * H), null, "a one-off");
+  assert.equal(missedRun(daily, 30 * DAY), null, "stopped weeks ago: no pattern left to expect");
+  // Weekdays only: days 5 and 6 of each week are off.
+  const weekdays = Array.from({ length: 21 }, (_, d) => d * DAY).filter((t) => ![5, 6].includes((t / DAY) % 7));
+  assert.equal(missedRun(weekdays.filter((t) => t < 19 * DAY), 19 * DAY + 3 * H), null, "a Saturday: no run expected");
+  assert.equal(missedRun(weekdays.filter((t) => t < 21 * DAY), 21 * DAY + 3 * H), 21 * DAY, "the Monday after: expected");
 });
 
 test("a missed routine is warned about once, in its agent's channel", async () => {
-  const days = [0, 1, 2, 3].map((d) => run({ id: `r${d}`, identifier: `BAD-${100 + d}`, status: "done", createdAt: new Date(Date.UTC(2026, 10, 1 + d, 15)) }));
+  const days = Array.from({ length: 15 }, (_, d) => run({ id: `r${d}`, identifier: `BAD-${100 + d}`, status: "done", createdAt: new Date(Date.UTC(2026, 9, 21 + d, 15)) }));
   const t = setup(days, { now: Date.UTC(2026, 10, 5, 19) });
   await t.r.checkMissed();
   await t.r.checkMissed();
   assert.equal(t.posts.length, 1);
-  assert.equal(t.posts[0].text, ":warning: **Daily client report** has not run. It usually runs every day; the last run was 2026-11-04 15:00 UTC (**BAD-103**). Check the routine in Paperclip; if it was paused on purpose, ignore this.");
+  assert.equal(t.posts[0].text, ":warning: **Daily client report** missed its Thu 15:00 UTC run (it ran at that time the last two weeks). Last run: 2026-11-04 15:00 UTC (**BAD-114**). Check the routine in Paperclip; if it was paused on purpose, ignore this.");
 });

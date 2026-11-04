@@ -1,15 +1,17 @@
 // Routine runs work in silence and speak up only when someone is needed, in their agent's channel
 // (or the approvals channel):
 //   - a run that ends blocked, with the person it needs @mentioned and the agent's latest comment;
-//   - a routine that missed its usual time (its rhythm is learnt from its recent runs), which also
-//     catches runs that never happened because Paperclip or this machine was down.
+//   - a routine that missed a run it made at that time the last two weeks, which also catches runs
+//     that never happened because Paperclip or this machine was down.
 // A finished run is posted only for agents whose channel is set to post routine results.
 // Routine tasks are the ones Paperclip marks `routine_execution`; tasks asked for in a Mattermost
 // thread report there instead (WorkLinks).
 import { finalComment, type TaskComment } from "./worklinks.ts";
 
 export const ROUTINE = "routine_execution";
-const HOUR = 3_600_000;
+const HOUR = 3_600_000, DAY = 24 * HOUR, WEEK = 7 * DAY;
+/** How far off a run may be and still count as the same weekly run. */
+const GRACE = 2 * HOUR;
 const MAX_POST = 15000;
 
 export interface RoutineTask {
@@ -90,7 +92,7 @@ export class RoutineReports {
     }
   }
 
-  /** Routines past their usual time, each warned about once per missed run. */
+  /** Routines that missed a run they make every week, each warned about once until they run again. */
   async checkMissed(): Promise<void> {
     const now = (this.d.now ?? Date.now)();
     const byRoutine = new Map<string, RoutineTask[]>();
@@ -99,47 +101,44 @@ export class RoutineReports {
       byRoutine.set(r.originId, [...(byRoutine.get(r.originId) ?? []), r]);
     }
     for (const [routineId, runs] of byRoutine) {
-      const missed = lateBy(runs.map((r) => new Date(r.createdAt!).getTime()), now);
-      if (!missed) continue;
-      const last = runs.reduce((a, b) => (new Date(b.createdAt!).getTime() > new Date(a.createdAt!).getTime() ? b : a));
+      const times = runs.map((r) => new Date(r.createdAt!).getTime());
+      const slot = missedRun(times, now);
+      if (slot === null) continue;
+      const last = runs[times.indexOf(Math.max(...times))];
+      const lastAt = Math.max(...times);
       const agentId = last.assigneeAgentId;
       const key = `routinemissed:${routineId}`;
-      if (!agentId || (await this.d.store.get<number>(key)) === missed.last) continue;
+      if (!agentId || (await this.d.store.get<number>(key)) === lastAt) continue;
       const where = await this.d.channelFor(agentId);
       if (!where) continue;
       await this.d.post(agentId, where.channelId,
-        `:warning: **${last.title}** has not run. It usually runs every ${every(missed.interval)}; the last run was ${utc(missed.last)} (**${last.identifier ?? "its last task"}**). ` +
-        `Check the routine in Paperclip; if it was paused on purpose, ignore this.`);
-      await this.d.store.set(key, missed.last);
+        `:warning: **${last.title}** missed its ${utc(slot, true)} run (it ran at that time the last two weeks). ` +
+        `Last run: ${utc(lastAt)} (**${last.identifier ?? "its last task"}**). Check the routine in Paperclip; if it was paused on purpose, ignore this.`);
+      await this.d.store.set(key, lastAt);
     }
   }
 }
 
 /**
- * When a routine with a steady rhythm (at least 4 runs, gaps within 1.5x of each other) is overdue by
- * more than an eighth of its interval (at least an hour): its interval and last run. Routines idle for
- * over three intervals are taken as stopped on purpose.
+ * The time of a run this routine should have made in the last day but did not: it ran then (within
+ * two hours, enough for a clock change) one and two weeks before, and has not run since. Weekly
+ * patterns keep weekday-only, business-hours and twice-daily routines from false alarms; asking for
+ * two weeks in a row leaves out one-off and irregular (webhook) runs.
  */
-export function lateBy(times: number[], now: number): { interval: number; last: number } | null {
-  const t = [...new Set(times)].sort((a, b) => a - b).slice(-5);
-  if (t.length < 4) return null;
-  const gaps = t.slice(1).map((x, i) => x - t[i]);
-  const min = Math.min(...gaps), max = Math.max(...gaps);
-  if (min <= 0 || max > min * 1.5) return null;
-  const interval = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
-  const last = t.at(-1)!;
-  const overdue = now - (last + interval);
-  if (overdue < Math.max(HOUR, interval / 8) || now - last > interval * 3) return null;
-  return { interval, last };
+export function missedRun(times: number[], now: number): number | null {
+  const near = (x: number) => times.some((t) => Math.abs(t - x) <= GRACE);
+  const last = Math.max(...times);
+  let found: number | null = null;
+  for (const t of times) {
+    const slot = t + WEEK;
+    if (slot > now - GRACE || slot < now - DAY || last >= slot - GRACE) continue;
+    if (near(t - WEEK) && (found === null || slot < found)) found = slot;
+  }
+  return found;
 }
 
-function every(ms: number): string {
-  const h = ms / HOUR;
-  const near = (x: number) => Math.abs(h - x) <= x * 0.1;
-  if (near(1)) return "hour";
-  if (near(24)) return "day";
-  if (near(168)) return "week";
-  return h < 48 ? `${Math.round(h)} hours` : `${Math.round(h / 24)} days`;
-}
-
-const utc = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const utc = (ms: number, short = false) => {
+  const d = new Date(ms);
+  return short ? `${DAYS[d.getUTCDay()]} ${d.toISOString().slice(11, 16)} UTC` : `${d.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+};
