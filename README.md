@@ -9,7 +9,7 @@ Your [Paperclip](https://github.com/paperclipai/paperclip) agents as Mattermost 
 - **Files both ways.** Attach files to a message and the agent can read them. Files the agent saves are attached to its reply.
 - **Choices as buttons.** An agent can offer options (`choices: A | B | C` on its last line), which appear as buttons. A click is sent back as your answer.
 - **Approvals with buttons.** Every Paperclip approval is posted in an approvals channel with Approve / Reject buttons, including hires, budget overrides, board approvals and high-risk tool calls. An approval raised during a conversation also appears in that thread.
-- **Task decision cards.** When an agent asks something on a task, the card is posted in the approvals channel, and also in the thread the task was asked for in, where the person is waiting: Questions that want a written answer, or allow another one, get a button that opens a form to type it in.
+- **Task decision cards.** When an agent asks something on a task, the card is posted in the approvals channel, and also in the thread the task was asked for in, where the person is waiting: Questions that want a written answer, or allow another one, get a button that opens a form to type it in. Each card @mentions only the person it is for: whom the agent addressed it to, else whom the task is done for (matched by the emails in the plugin settings).
   - **Confirmations and suggested tasks** get Accept / Reject buttons.
   - **Single-choice questions** get a button per option. Your pick is posted on the task as a comment from you, which wakes the agent.
 - **Access control.** Choose who may talk to agents: everyone, or only the people you pick. Each person can be limited to some agents, and people outside Paperclip can be added by email.
@@ -88,7 +88,7 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag -a v0.25.0 -m v0.25.0 && git push origin main v0.25.0
+git tag -a v0.26.0 -m v0.26.0 && git push origin main v0.26.0
 ```
 
 GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.

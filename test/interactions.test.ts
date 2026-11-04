@@ -40,9 +40,10 @@ function setup(perAgent: Record<string, string> = {}, threads: Record<string, { 
     approvers: new Map([["sam@example.com", "u-sam"]]),
     now: () => new Date(T0),
     openDialog: async (triggerId, dialog) => { dialogs.push({ triggerId, dialog }); },
+    mention: async (id) => ({ "u-jas": "@jasmin", "u-dan": "@dan" } as Record<string, string>)[id] ?? null,
   });
   const add = (card: Card) => byIssue.get("i1")!.push(card);
-  return { c, posts, responses, comments, add, byIssue, dialogs };
+  return { c, posts, responses, comments, add, byIssue, dialogs, issues };
 }
 
 test("cards raised after the first run are posted to the channel, as the agent that raised them; older ones are not", async () => {
@@ -262,4 +263,28 @@ test("an old card's \"Type an answer\" button opens the form instead of sending 
   await t.c.click({ user_id: "mm-sam", user_name: "sam", context: ctx, submission: { answer: "Aggregate counts only." } });
   assert.match(t.comments[0].body, /Aggregate counts only\./);
   assert.doesNotMatch(t.comments[0].body, /Type an answer/);
+});
+
+test("a card pings only the person it is for: whom the agent addressed, else whom the task is for", async () => {
+  const t = setup();
+  t.issues[0].responsibleUserId = "u-dan";
+  await t.c.poll();
+  t.add({ id: "a1", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", addresseeUserId: "u-jas", payload: { prompt: "Approve the batch?" } });
+  t.add({ id: "a2", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Ship?" } });
+  await t.c.poll();
+  assert.match(t.posts[0].message, /^@jasmin: \*\*Decision needed\*\* from CEO/);
+  assert.match(t.posts[1].message, /^@dan: \*\*Decision needed\*\*/, "nobody addressed: whom the task is for");
+  // Decided: the post keeps who it was for.
+  await t.c.click({ user_id: "mm-sam", user_name: "sam", context: t.posts[0].props.attachments[0].actions[0].integration.context });
+  assert.match(t.posts[0].message, /^@jasmin: /);
+  assert.match(t.posts[0].props.attachments[0].footer, /Accepted by @sam/);
+});
+
+test("a card for someone with no Mattermost account mentions nobody", async () => {
+  const t = setup();
+  t.issues[0].responsibleUserId = "u-stranger";
+  await t.c.poll();
+  t.add({ id: "a3", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Ok?" } });
+  await t.c.poll();
+  assert.match(t.posts[0].message, /^\*\*Decision needed\*\*/);
 });

@@ -20,9 +20,11 @@ export interface Card {
   createdAt: string | Date;
   createdByAgentId?: string | null;
   resolvedByUserId?: string | null;
+  /** The person the agent addressed the card to, if it named one. */
+  addresseeUserId?: string | null;
 }
 
-export interface OpenIssue { id: string; identifier?: string | null; title: string; assigneeAgentId?: string | null }
+export interface OpenIssue { id: string; identifier?: string | null; title: string; assigneeAgentId?: string | null; /** Whom the task is done for (usually who asked). */ responsibleUserId?: string | null }
 
 export interface CardDeps {
   poster: ApprovalPoster;
@@ -40,6 +42,8 @@ export interface CardDeps {
   /** The Mattermost thread a task was asked for in, and the agent that thread is with. */
   threadOf(issueId: string): Promise<{ channelId: string; rootId: string; agentId?: string } | null>;
   approvers: Map<string, string>;
+  /** A Paperclip user as an @mention (or their name when they have no Mattermost account), or null. */
+  mention?(userId: string): Promise<string | null>;
   /** Opens a Mattermost form (interactive dialog) for the click with this trigger id. */
   openDialog?(triggerId: string, dialog: Record<string, unknown>): Promise<void>;
   now?: () => Date;
@@ -47,7 +51,7 @@ export interface CardDeps {
 
 interface Picked { optionId: string; label: string; by: string; typed?: boolean }
 /** A posted card; for questions, the picks so far and who sent the answers. */
-interface Tracked { postId: string; issueId: string; by?: string; picks?: Record<string, Picked>; sent?: string; /** The same card in the thread the task was asked for in. */ threadPostId?: string }
+interface Tracked { postId: string; issueId: string; by?: string; picks?: Record<string, Picked>; sent?: string; /** Who the card is for, as written on it ("@jasmin"). */ for?: string; /** The same card in the thread the task was asked for in. */ threadPostId?: string }
 interface Question { id: string; prompt?: string; helpText?: string; selectionMode?: string; allowOther?: boolean; options?: { id: string; label?: string; freeText?: boolean }[] }
 
 /** Questions answerable with buttons: every one single-choice with options to click. */
@@ -111,11 +115,12 @@ function renderQuestions(c: Card, qs: Question[], message: string, d: RenderDeps
   return { message, props: { attachments: blocks } };
 }
 
-export function renderCard(c: Card, issue: OpenIssue, agentName: string, d: RenderDeps, by?: string, t?: Pick<Tracked, "picks" | "sent">): { message: string; props: Record<string, unknown> } {
+export function renderCard(c: Card, issue: OpenIssue, agentName: string, d: RenderDeps, by?: string, t?: Pick<Tracked, "picks" | "sent" | "for">): { message: string; props: Record<string, unknown> } {
   const p = c.payload ?? {};
+  const forWhom = t?.for ? `${t.for}: ` : "";
   const link = `${d.paperclipUrl}/issues/${encodeURIComponent(issue.identifier || issue.id)}`;
   const qs = c.kind === "ask_user_questions" && c.status === "pending" ? buttonQuestions(c) : null;
-  if (qs) return renderQuestions(c, qs, `**Question** from ${agentName} on [${issue.identifier ?? "a task"}: ${issue.title}](${link})`, d, t);
+  if (qs) return renderQuestions(c, qs, `${forWhom}**Question** from ${agentName} on [${issue.identifier ?? "a task"}: ${issue.title}](${link})`, d, t);
   const lines: string[] = [];
   let title = str(c.title);
   let accept = "Accept";
@@ -151,7 +156,7 @@ export function renderCard(c: Card, issue: OpenIssue, agentName: string, d: Rend
   });
   const outcome = `${OUTCOME[c.status] ?? c.status}${by ? ` by ${by}` : ""}${t?.sent && c.status === "answered" ? " (answered from Mattermost)" : ""}`;
   return {
-    message: `**${c.kind === "ask_user_questions" ? "Question" : "Decision needed"}** from ${agentName} on [${issue.identifier ?? "a task"}: ${issue.title}](${link})`,
+    message: `${forWhom}**${c.kind === "ask_user_questions" ? "Question" : "Decision needed"}** from ${agentName} on [${issue.identifier ?? "a task"}: ${issue.title}](${link})`,
     props: {
       attachments: [{
         color: pending ? "#f2a900" : c.status === "accepted" || c.status === "answered" ? "#3db887" : "#8a8a8a",
@@ -222,11 +227,14 @@ export class Cards {
           // thread is with (another agent's bot cannot post in that DM).
           const thread = await d.threadOf(issue.id);
           if (!where && !thread) continue; // nowhere to post: tried again on the next pass
-          const { message, props } = renderCard(c, issue, d.agentName(agentId), d);
+          // Only the person the decision is for is pinged: whom the agent addressed, else whom the task is for.
+          const who = c.addresseeUserId ?? issue.responsibleUserId;
+          const mention = who && d.mention ? (await d.mention(who).catch(() => null)) ?? undefined : undefined;
+          const { message, props } = renderCard(c, issue, d.agentName(agentId), d, undefined, { for: mention });
           const inThread = thread && thread.channelId !== where?.channelId
             ? await d.poster.post(thread.agentId ?? agentId, { channelId: thread.channelId, rootId: thread.rootId }, message, props) : undefined;
           const postId = where ? await d.poster.post(agentId, { channelId: where.channelId, rootId: "" }, where.note ? `${message}\n_${where.note}_` : message, props) : inThread!;
-          posted[c.id] = { postId, issueId: issue.id, ...(inThread ? { threadPostId: inThread } : {}) };
+          posted[c.id] = { postId, issueId: issue.id, ...(inThread ? { threadPostId: inThread } : {}), ...(mention ? { for: mention } : {}) };
         }
       }
     }

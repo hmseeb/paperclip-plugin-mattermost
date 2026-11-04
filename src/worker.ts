@@ -208,6 +208,12 @@ class Tenant {
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
       agentName, store, actionUrl, key, paperclipUrl, channelFor, approvers,
       threadOf: (issueId) => store.get<{ channelId: string; rootId: string; agentId?: string }>(`issuethread:${issueId}`),
+      mention: async (userId) => {
+        const p = people.get(userId);
+        if (!p) return null;
+        const u = await manager.request<{ username: string }>("GET", `/users/email/${encodeURIComponent(p.email)}`).catch(() => null);
+        return u ? `@${u.username}` : p.name ?? null;
+      },
       openDialog: async (triggerId, dialog) => { await manager.request("POST", "/actions/dialogs/open", { trigger_id: triggerId, url: actionUrl, dialog }); },
     }) : null;
     const poster = this.poster(manager, roster);
