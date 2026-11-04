@@ -74,6 +74,9 @@ class Tenant {
   private paperclipUrl = "";
   private channelFor: ChannelFor = async () => null;
   private timers: ReturnType<typeof setInterval>[] = [];
+  /** The agents' bots after a (re)start: calls wait for the first sync. */
+  private firstSync: Promise<void> = Promise.resolve();
+  private synced = false;
 
   constructor(readonly companyId: string) {}
 
@@ -307,7 +310,9 @@ class Tenant {
         .then(() => { this.status = `${roster.size} agent bots in sync`; })
         .catch((err) => { this.status = `agent bot sync failed: ${errText(err)}`; ctx.logger.error(this.status, { companyId }); });
       // Once the bots are connected: replies a restart interrupted are asked for again and delivered.
-      void sync().then(() => bridge.resume()).then((n) => { if (n) ctx.logger.info("resuming replies interrupted by a restart", { companyId, threads: n }); })
+      const first = sync().then(() => { this.synced = true; });
+      this.firstSync = first;
+      void first.then(() => bridge.resume()).then((n) => { if (n) ctx.logger.info("resuming replies interrupted by a restart", { companyId, threads: n }); })
         .catch((err) => warn("could not resume interrupted replies", { err: errText(err) }));
       this.timers.push(setInterval(sync, SYNC_EVERY_MS));
       void ensureSkill(companyId).catch((err) => warn("could not install the Mattermost skill", { err: errText(err) }));
@@ -345,6 +350,9 @@ class Tenant {
   /** An agent's call to one of the plugin's `/mm/...` routes. */
   async api(agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>, runId: string | null = null): Promise<{ status: number; body: unknown }> {
     if (!this.actions) return { status: 503, body: { error: `Mattermost is not connected for this company (${this.status})` } };
+    // Just after a restart the agents' bots are still reconnecting: wait for them (within the host's 30 s per call).
+    if (!this.synced) await Promise.race([this.firstSync, new Promise((r) => setTimeout(r, 25_000))]);
+    if (!this.synced) return { status: 503, body: { error: "Mattermost is starting up after a restart and your bot is still reconnecting. Try again in a minute.", retryAfterSeconds: 60 } };
     return this.actions.handle(agentId, routeKey, params, input, runId);
   }
 
