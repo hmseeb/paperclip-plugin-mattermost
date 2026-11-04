@@ -116,13 +116,12 @@ test("an agent with no bot is told so", async () => {
   assert.equal((await t.actions.handle("a-nobody", "channels", {}, {})).status, 409);
 });
 
-test("a work channel mirrors task comments and closes with the task", async () => {
+test("a work channel mirrors task comments; when the task closes the outcome goes back to where it was asked and the channel stays open", async () => {
   const store = new Map<string, unknown>([
     ["taskchannel:issue-1", "chan"],
     ["worklink:chan", { issueId: "issue-1", identifier: "BAD-1", title: "Checkout 5xx", agentId: "a-cto", origin: { channelId: "o", rootId: "r" } }],
   ]);
   const posts: { as: string; channelId: string; rootId: string; text: string }[] = [];
-  const archived: string[] = [];
   let status = "in_progress";
   const comments: TaskComment[] = [{ id: "k1", body: "Found it: bad deploy", authorAgentId: "a-ceo" }, { id: "k2", body: "Board note", authorAgentId: null }];
   const work = new WorkLinks({
@@ -131,7 +130,6 @@ test("a work channel mirrors task comments and closes with the task", async () =
     post: async (as, channelId, rootId, text) => { posts.push({ as, channelId, rootId, text }); },
     hasBot: (id) => id === "a-ceo" || id === "a-cto",
     agentName: (id) => id,
-    archive: async (id) => { archived.push(id); },
     channelName: async () => "inc checkout 5xx",
     task: async () => ({ identifier: "BAD-1", title: "Checkout 5xx", status }),
     comments: async () => comments,
@@ -144,12 +142,14 @@ test("a work channel mirrors task comments and closes with the task", async () =
   assert.equal(posts.length, 2, "same status: nothing new");
   status = "done";
   await work.updated("issue-1");
-  assert.deepEqual(archived, ["chan"]);
-  assert.match(posts.at(-1)!.text, /Done.*BAD-1[\s\S]*Board note[\s\S]*archived/);
-  assert.deepEqual([posts.at(-1)!.channelId, posts.at(-1)!.rootId], ["o", "r"]);
+  const [inChannel, back] = posts.slice(-2);
+  assert.equal(inChannel.channelId, "chan");
+  assert.match(inChannel.text, /BAD-1 is done.*this channel stays open/);
+  assert.equal(back.text, "Board note\n\n:white_check_mark: Done: **BAD-1** Checkout 5xx\n_Discussion: ~inc checkout 5xx_");
+  assert.deepEqual([back.channelId, back.rootId], ["o", "r"]);
   await work.updated("issue-1");
   await work.comment("issue-1", "k1");
-  assert.equal(archived.length, 1, "closed links stay closed");
+  assert.equal(posts.length, 4, "closed links stay closed");
 });
 
 test("a task's result, posted by its run without naming a thread, lands in the thread it was asked for in", async () => {
@@ -171,7 +171,7 @@ test("a task asked for in a thread reports back there when done, cancelled or bl
     store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
     post: async (as, channelId, rootId, text) => { posts.push({ as, channelId, rootId, text }); },
     hasBot: (id) => id === "a-ceo" || id === "a-reporting",
-    agentName: (id) => id, archive: async () => {}, channelName: async () => "",
+    agentName: (id) => id, channelName: async () => "",
     task: async () => ({ identifier: "BAD-728", title: "Client reporting batch", status, assigneeAgentId: "a-reporting" }),
     comments: async () => [{ id: "k1", body: "Batch posted for approval: 12 receipts, 3 weekly reports.", authorAgentId: "a-reporting" }],
   });
@@ -197,7 +197,7 @@ test("a result Mattermost refuses is not marked reported, so the next update tri
     sleep: async () => {},
     store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
     post: async (_as, _c, _r, text) => { if (fail) throw new Error("403"); posts.push(text); },
-    hasBot: () => true, agentName: (id) => id, archive: async () => {}, channelName: async () => "",
+    hasBot: () => true, agentName: (id) => id, channelName: async () => "",
     task: async () => ({ identifier: "BAD-1", title: "T", status: "done", assigneeAgentId: "a-ceo" }),
     comments: async () => [],
   });
@@ -214,7 +214,7 @@ test("two updates of one task arriving together report it once", async () => {
     sleep: async () => {},
     store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
     post: async (_as, _c, _r, text) => { posts.push(text); },
-    hasBot: () => true, agentName: (id) => id, archive: async () => {}, channelName: async () => "",
+    hasBot: () => true, agentName: (id) => id, channelName: async () => "",
     task: async () => { await new Promise((r) => setTimeout(r, 5)); return { identifier: "BAD-798", title: "T", status: "blocked", assigneeAgentId: "a-cto" }; },
     comments: async () => [],
   });
@@ -231,7 +231,7 @@ test("a task marked done with its answer in the same call reports the answer, th
     sleep: async () => { if (++waits === 2) comments.push({ id: "k", body: "Nov 2 notes: decisions A and B; Dan owns the follow-up.", createdAt: new Date() }); },
     store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
     post: async (_as, _c, _r, text) => { posts.push(text); },
-    hasBot: () => true, agentName: (id) => id, archive: async () => {}, channelName: async () => "",
+    hasBot: () => true, agentName: (id) => id, channelName: async () => "",
     task: async () => ({ identifier: "BAD-1056", title: "Check November 2 meeting notes", status: "done", assigneeAgentId: "a-cto" }),
     comments: async () => [...comments],
   });
@@ -270,4 +270,22 @@ test("nudging a task from a chat: written as the person being answered, labelled
   askedBy = undefined;
   assert.equal((await nudge("BAD-1127", "x")).status, 409, "not answering a person (another agent asked, or no chat)");
   assert.equal(comments.length, 1);
+});
+
+test("a work channel whose task was asked for in a thread reports there once (the thread report), not twice", async () => {
+  const store = new Map<string, unknown>([
+    ["taskchannel:i", "chan"], ["issuethread:i", { channelId: "o", rootId: "r", agentId: "a-cto", status: "done" }],
+    ["worklink:chan", { issueId: "i", identifier: "BAD-2", title: "T", agentId: "a-cto", origin: { channelId: "o", rootId: "r" }, status: "in_progress" }],
+  ]);
+  const posts: { channelId: string; text: string }[] = [];
+  const work = new WorkLinks({
+    sleep: async () => {},
+    store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
+    post: async (_as, channelId, _r, text) => { posts.push({ channelId, text }); },
+    hasBot: () => true, agentName: (id) => id, channelName: async () => "bad-2",
+    task: async () => ({ identifier: "BAD-2", title: "T", status: "done" }),
+    comments: async () => [{ id: "k", body: "All set." }],
+  });
+  await work.updated("i");
+  assert.deepEqual(posts.map((p) => p.channelId), ["chan"], "only the note in the channel; the thread report comes from threadUpdate");
 });

@@ -258,7 +258,6 @@ class Tenant {
       },
       hasBot: (agentId) => Boolean(roster.clientOf(agentId)),
       agentName: (agentId) => agentName(agentId),
-      archive: async (channelId) => { await manager.request("DELETE", `/channels/${channelId}`); },
       channelName: async (channelId) => (await manager.request<{ display_name: string }>("GET", `/channels/${channelId}`)).display_name,
       task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
       comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId, createdAt: c.createdAt })),
@@ -269,6 +268,7 @@ class Tenant {
       comments: async (issueId) => (await ctx.issues.listComments(issueId, companyId)).map((c) => ({ body: c.body })),
       hasBot: (agentId) => Boolean(roster.clientOf(agentId)),
       agentName: (agentId) => agentName(agentId),
+      people: () => [...people].map(([userId, p]) => ({ userId, names: [p.name ?? "", (p.name ?? "").split(/\s+/)[0], p.email.split("@")[0]].filter(Boolean) })),
       open: async (owner, t) => {
         const bot = roster.clientOf(owner);
         if (!bot) throw new Error("the task's agent has no Mattermost bot");
@@ -507,6 +507,7 @@ const plugin = definePlugin({
     ctx.events.on("issue.comment.created", (e) => quietly("could not mirror a task comment", async () => {
       const commentId = (e.payload as { commentId?: string } | undefined)?.commentId;
       if (e.entityId && commentId) await tenants.get(e.companyId)?.work?.comment(e.entityId, commentId);
+      if (e.entityId) await tenants.get(e.companyId)?.auto?.changed(e.entityId); // a comment can name people to add
     }));
     ctx.events.on("issue.updated", (e) => quietly("could not follow a task update", async () => {
       if (!e.entityId) return;

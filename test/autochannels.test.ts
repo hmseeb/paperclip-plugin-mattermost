@@ -2,16 +2,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AutoChannels, type AutoTask } from "../src/autochannels.ts";
 
-function setup(tasks: AutoTask[]) {
+function setup(tasks: AutoTask[], opts: { fromMattermost?: boolean; people?: { userId: string; names: string[] }[]; comments?: string[] } = {}) {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const store = new Map<string, unknown>();
+  // Asked for in a Mattermost thread, unless a test says otherwise.
+  if (opts.fromMattermost !== false) for (const t of tasks) if (!t.parentId) store.set(`issuethread:${t.id}`, { channelId: "dm", rootId: "r" });
   const opened: { owner: string; task: string }[] = [];
   const added: { channelId: string; agents: string[]; users: string[] }[] = [];
   const posts: { as: string; channelId: string; text: string }[] = [];
   const auto = new AutoChannels({
     store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
     task: async (id) => byId.get(id) ?? null,
-    comments: async () => [{ body: "Numbers checked." }],
+    comments: async () => (opts.comments ?? ["Numbers checked."]).map((body) => ({ body })),
+    ...(opts.people ? { people: () => opts.people! } : {}),
     hasBot: (id) => id.startsWith("a-"),
     agentName: (id) => id.slice(2).toUpperCase(),
     open: async (owner, t) => { opened.push({ owner, task: t.id }); return `ch-${t.id}`; },
@@ -30,7 +33,7 @@ test("rule 1: an agent's task assigned to a person gets a channel with the agent
   await t.auto.changed("t1"); // events come more than once
   assert.deepEqual(t.opened, [{ owner: "a-cto", task: "t1" }]);
   assert.deepEqual(t.added[0], { channelId: "ch-t1", agents: ["a-cto"], users: ["u-greg", "u-haseeb"] });
-  assert.match(t.posts[0].text, /people and agents are working on it together/);
+  assert.match(t.posts[0].text, /people and agents are working on it together.*this channel stays open/);
 });
 
 test("rule 1: a person as reviewer counts; a person who only asked does not", async () => {
@@ -94,4 +97,28 @@ test("a task an agent already opened a channel for is left alone; people not fou
   await t.auto.changed("x");
   assert.deepEqual(t.opened.map((o) => o.task), ["x"]);
   assert.match(t.posts[0].text, /Could not add u-unknown/);
+});
+
+test("only work asked for in Mattermost gets a channel: a task, or a subtask of one, from a conversation there", async () => {
+  const t = setup([{ id: "x", ...base, assigneeAgentId: "a-cto", assigneeUserId: "u-greg" }], { fromMattermost: false });
+  await t.auto.changed("x");
+  assert.equal(t.opened.length, 0, "created in Paperclip or by a routine: no channel");
+  t.store.set("issuethread:x", { channelId: "dm", rootId: "r" });
+  await t.auto.changed("x");
+  assert.equal(t.opened.length, 1);
+});
+
+test("people the task names are added; a name alone does not open a channel", async () => {
+  const people = [{ userId: "u-dan", names: ["Daniel", "dan"] }, { userId: "u-mira", names: ["Mira"] }];
+  const t = setup([
+    { id: "p", identifier: "BAD-1142", ...base, title: "Apply sending limits for Reply Desk/Dan coverage", assigneeAgentId: "a-reply", responsibleUserId: "u-haseeb" },
+    { id: "k1", ...base, parentId: "p", assigneeAgentId: "a-cto" },
+    { id: "k2", ...base, parentId: "p", assigneeAgentId: "a-cmo" },
+    { id: "solo", ...base, title: "Ask Dan about DNS", assigneeAgentId: "a-cto" },
+  ], { people, comments: ["Mira should review the copy."] });
+  await t.auto.changed("solo");
+  assert.equal(t.opened.length, 0, "naming Dan alone opens nothing");
+  await t.auto.changed("k1");
+  await t.auto.changed("k2");
+  assert.deepEqual(t.added[0].users.sort(), ["u-dan", "u-haseeb", "u-mira"]);
 });

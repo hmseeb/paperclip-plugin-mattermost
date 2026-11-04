@@ -26,7 +26,7 @@ tell whoever you are working with and carry on. A 403 says why something is not 
   what it is: "inc checkout 5xx", "inv q3 conversion drop", "proj crm migration".
 - **Announce a work channel where the request came in**, in one message: what it is for, who you
   pulled in, and that you will report back there. When the task is done or cancelled the plugin
-  archives the channel and posts the outcome back where you asked; you do not need to.
+  posts the outcome back where you asked (the channel stays open); you do not need to.
 - **Hand work to another agent by mentioning it** (@cto) in a channel or thread it is in; invite it
   first if it is not. Give it the context it needs in that message. It replies in the thread.
   Mention an agent only when you want it to act: every mention starts it.
@@ -68,7 +68,7 @@ Channels (POST, JSON body):
 - /mm/channels                   {"name": "inc checkout 5xx", "purpose": "...", "people": ["username"],
                                   "agents": ["cto"], "taskId": "BAD-123 or task id", "private": true}
   Private by default. A public channel needs approval. With taskId, the channel is tied to the
-  task: its comments and status show up there, and it is archived when the task closes.
+  task: its comments and status show up there, and its outcome goes back where it was asked when it closes.
 - /mm/channels/{channel}/invite  {"people": [...], "agents": [...]}   free on channels you created
 - /mm/channels/{channel}/update  {"purpose": "...", "header": "...", "name": "..."}  yours only
 - /mm/channels/{channel}/archive {}                                   yours only

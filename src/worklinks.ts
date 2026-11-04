@@ -1,6 +1,6 @@
 // A work channel follows its Paperclip task: new task comments are mirrored into it,
-// status changes are noted, and when the task is done or cancelled the channel is
-// archived and the outcome posted back where the work was requested. Posts made here
+// status changes are noted, and when the task is done or cancelled the outcome is posted
+// back where the work was requested; the channel stays open. Posts made here
 // carry `from_paperclip`, so the bridge never treats them as agents addressing agents.
 import type { WorkLink } from "./actions.ts";
 
@@ -22,7 +22,6 @@ export interface WorkDeps {
   post(agentId: string, channelId: string, rootId: string, text: string): Promise<void>;
   hasBot(agentId: string): boolean;
   agentName(agentId: string): string;
-  archive(channelId: string): Promise<void>;
   channelName(channelId: string): Promise<string>;
   task(issueId: string): Promise<{ identifier?: string | null; title: string; status: string; assigneeAgentId?: string | null } | null>;
   comments(issueId: string): Promise<TaskComment[]>;
@@ -119,7 +118,7 @@ export class WorkLinks {
     return list.at(-1);
   }
 
-  /** The task changed: note a new status; on done or cancelled, archive and report back. */
+  /** The task changed: note a new status; on done or cancelled, report back (the channel stays open). */
   updated(issueId: string): Promise<void> {
     return this.serial(`link:${issueId}`, () => this.followLink(issueId));
   }
@@ -139,15 +138,15 @@ export class WorkLinks {
     }
     link.closed = true;
     await this.d.store.set(`worklink:${channelId}`, link);
-    const last = (await this.finalComment(issueId))?.body?.trim();
-    const outcome = last ? `\n\n${last.length > 1500 ? last.slice(0, 1500) + "…" : last}` : "";
     const done = task.status === "done";
-    const name = await this.d.channelName(channelId).catch(() => "the work channel");
-    await this.d.post(link.agentId, channelId, "", `${done ? ":white_check_mark:" : ":no_entry_sign:"} ${this.label(link)} is ${task.status}. Archiving this channel; it stays readable under archived channels.`);
-    await this.d.archive(channelId);
-    if (link.origin) {
-      await this.d.post(link.agentId, link.origin.channelId, link.origin.rootId,
-        `${done ? ":white_check_mark: Done" : ":no_entry_sign: Cancelled"}: **${this.label(link)}** ${task.title}${outcome}\n\n_~${name} is archived._`);
-    }
+    // The channel stays open (its history and people stay put); the outcome goes back where it was asked for.
+    await this.d.post(link.agentId, channelId, "", `${done ? ":white_check_mark:" : ":no_entry_sign:"} ${this.label(link)} is ${task.status}. The outcome is posted back where it was asked for; this channel stays open.`);
+    // A task asked for in a thread reports there itself (threadUpdate): once is enough.
+    if (!link.origin || (await this.d.store.get(`issuethread:${issueId}`))) return;
+    const last = (await this.finalComment(issueId))?.body?.trim();
+    const status = `${done ? ":white_check_mark: Done" : ":no_entry_sign: Cancelled"}: **${this.label(link)}** ${task.title}`;
+    const name = await this.d.channelName(channelId).catch(() => "");
+    const text = `${last ? `${last.length > MAX_POST ? last.slice(0, MAX_POST) + "…" : last}\n\n` : ""}${status}${name ? `\n_Discussion: ~${name}_` : ""}`;
+    await this.d.post(link.agentId, link.origin.channelId, link.origin.rootId, text);
   }
 }

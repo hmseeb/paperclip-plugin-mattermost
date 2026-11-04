@@ -1,9 +1,11 @@
-// Work channels opened by the plugin itself, for tasks where people and agents work together:
+// Work channels opened by the plugin itself, for tasks asked for in Mattermost (the task, or its
+// parent, was created during a Mattermost conversation) where people and agents work together:
 //   1. an agent's task that a person is assigned to, or reviews or approves;
 //   2. a task whose subtasks are with at least two other agents.
-// The channel is a normal work channel (comments mirrored, archived when the task is done or
-// cancelled). Its members are the task's agent, the other agents on it and the people involved,
-// including whoever asked for it; ones who join the task later are added as they appear. A subtask
+// The channel is a normal work channel (comments mirrored; when the task is done or cancelled the
+// outcome goes back to the thread it came from, and the channel stays open). Its members are the
+// task's agent, the other agents on it, the people involved, whoever asked for it and the people the
+// task names (title, description, comments); ones who join later are added as they appear. A subtask
 // finishing, blocking or being cancelled is noted there. Subtasks are learnt from task events, so
 // only ones created after this feature are counted.
 
@@ -11,6 +13,7 @@ export interface AutoTask {
   id: string;
   identifier?: string | null;
   title: string;
+  description?: string | null;
   status: string;
   parentId?: string | null;
   assigneeAgentId?: string | null;
@@ -26,6 +29,8 @@ export interface AutoDeps {
   task(issueId: string): Promise<AutoTask | null>;
   comments(issueId: string): Promise<{ body: string }[]>;
   hasBot(agentId: string): boolean;
+  /** People who can be added, each with the names they go by (first name, full name, email name). */
+  people?(): { userId: string; names: string[] }[];
   agentName(agentId: string): string;
   /** Opens the task's work channel as `owner`'s bot; returns its id. */
   open(owner: string, task: AutoTask): Promise<string>;
@@ -77,6 +82,9 @@ export class AutoChannels {
     if (CLOSED.has(t.status)) return;
     const owner = [t.assigneeAgentId, t.createdByAgentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
     if (!owner) return;
+    const opened = await this.d.store.get<Opened>(`autochannel:${t.id}`);
+    // Only for work asked for in Mattermost: the task, or its parent, came from a conversation there.
+    if (!opened && !(await this.d.store.get(`issuethread:${t.id}`)) && !(t.parentId && (await this.d.store.get(`issuethread:${t.parentId}`)))) return;
     const people = new Set<string>();
     if (t.assigneeUserId) people.add(t.assigneeUserId);
     for (const stage of t.executionPolicy?.stages ?? []) for (const p of stage.participants ?? []) if (p.type === "user" && p.userId) people.add(p.userId);
@@ -86,9 +94,13 @@ export class AutoChannels {
     if (!why) return;
     const asker = t.createdByUserId ?? t.responsibleUserId;
     if (asker) people.add(asker);
+    // People the task names are added too; naming someone alone does not open a channel.
+    if (this.d.people) {
+      const text = [t.title, t.description ?? "", ...(await this.d.comments(t.id)).map((c) => c.body)].join("\n");
+      for (const id of namedPeople(text, this.d.people())) people.add(id);
+    }
     const agents = [owner, ...others];
 
-    const opened = await this.d.store.get<Opened>(`autochannel:${t.id}`);
     if (opened) {
       // People and agents who joined the task since: add them.
       const fresh = [...agents, ...people].filter((m) => !opened.members.includes(m));
@@ -103,7 +115,7 @@ export class AutoChannels {
     const missing = await this.d.add(channelId, agents, [...people]);
     const label = t.identifier ?? "this task";
     await this.d.post(owner, channelId,
-      `Channel for **${label}** ${t.title}, opened because ${why}. Task comments appear here, and it is archived when ${label} is done or cancelled.` +
+      `Channel for **${label}** ${t.title}, opened because ${why}. Task comments appear here; when ${label} is done or cancelled the outcome goes back to the thread it was asked in, and this channel stays open.` +
       (missing.length ? `\n\n_Could not add ${missing.join(", ")}: not matched to a Mattermost account (add them to the plugin's approvers or people list)._` : ""));
   }
 
@@ -120,4 +132,22 @@ export class AutoChannels {
     await this.d.post(opened.owner, opened.channelId,
       `${icon} Subtask **${t.identifier ?? t.title}** ${t.identifier ? t.title : ""} is ${t.status}${by}.${outcome ? `\n\n${outcome.length > 1500 ? outcome.slice(0, 1500) + "…" : outcome}` : ""}`);
   }
+}
+
+/**
+ * The people a text names: a known name of theirs as a whole word, any case ("Dan" for dan@…,
+ * "Greg" for Greg Mellott). Names under three letters are ignored: too easy to hit by accident.
+ */
+export function namedPeople(text: string, people: { userId: string; names: string[] }[]): string[] {
+  const hits: string[] = [];
+  for (const p of people) {
+    const found = p.names.some((n) => {
+      const name = n.trim();
+      if (name.length < 3) return false;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(?<![\\p{L}\\p{N}@._-])${escaped}(?![\\p{L}\\p{N}_-])`, "iu").test(text);
+    });
+    if (found) hits.push(p.userId);
+  }
+  return hits;
 }
