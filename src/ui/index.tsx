@@ -160,25 +160,28 @@ function AccessList({ members, agents, grants, accounts, onChange }: { members: 
  * Mattermost hides Personal Access Tokens until a System Admin switches them on, which is
  * where most setups stall. Links go straight to the two settings when the URL is known.
  */
-interface AgentChannel { agentId: string; channel: string }
+interface AgentChannel { agentId: string; channel: string; routineResults?: boolean }
 
 /** Agents whose decisions go to their own channel; the rest use the approvals channel. */
 function AgentChannels({ agents, channels, value, onChange }: { agents: AgentRow[]; channels: { name: string; displayName: string }[]; value: AgentChannel[]; onChange: (next: AgentChannel[]) => void }) {
   const named = (id: string) => agents.find((a) => a.id === id)?.name ?? "A removed agent";
   const free = agents.filter((a) => !value.some((r) => r.agentId === a.id));
-  const update = (agentId: string, channel: string) => onChange(value.map((r) => (r.agentId === agentId ? { agentId, channel } : r)));
+  const update = (agentId: string, change: Partial<AgentChannel>) => onChange(value.map((r) => (r.agentId === agentId ? { ...r, ...change } : r)));
   const picker = (r: AgentChannel) => channels.length ? (
-    <select style={s.input} value={r.channel} onChange={(e) => update(r.agentId, e.target.value)}>
+    <select style={s.input} value={r.channel} onChange={(e) => update(r.agentId, { channel: e.target.value })}>
       {channels.some((ch) => ch.name === r.channel) ? null : <option value={r.channel}>{r.channel || "Pick a channel"}</option>}
       {channels.map((ch) => <option key={ch.name} value={ch.name}>{ch.displayName}</option>)}
     </select>
-  ) : <input style={s.input} value={r.channel} onChange={(e) => update(r.agentId, e.target.value.trim())} placeholder="channel name, e.g. client-reporting" />;
+  ) : <input style={s.input} value={r.channel} onChange={(e) => update(r.agentId, { channel: e.target.value.trim() })} placeholder="channel name, e.g. client-reporting" />;
   return (
     <div style={{ display: "grid", gap: 6 }}>
       {value.map((r) => (
         <div key={r.agentId} style={s.row}>
           <span style={{ minWidth: 160 }}>{named(r.agentId)}</span>
           {picker(r)}
+          <label style={{ whiteSpace: "nowrap" }} title="Routine runs post here only when they need someone. Tick to also post every finished run (for routines whose output is the point, like a daily report).">
+            <input type="checkbox" checked={Boolean(r.routineResults)} onChange={(e) => update(r.agentId, { routineResults: e.target.checked })} /> post routine results
+          </label>
           <button style={{ ...s.button, padding: "4px 9px" }} title="Use the approvals channel" onClick={() => onChange(value.filter((x) => x.agentId !== r.agentId))}>✕</button>
         </div>
       ))}
@@ -405,7 +408,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
         )}
       </Field>
 
-      <Field label="Channel per agent" error={fieldErrors.agentChannels} help="Send one agent's approvals, decision cards and computer help requests to its own channel, for example a client reporting agent's drafts to #client-reporting. Only approvers can decide them, but everyone in that channel sees them. If its channel cannot be found, they go to the approvals channel with a note.">
+      <Field label="Channel per agent" error={fieldErrors.agentChannels} help="Send one agent's approvals, decision cards, computer help requests and routine alerts (a blocked run, a missed run) to its own channel, for example a client reporting agent's drafts to #client-reporting. Only approvers can decide them, but everyone in that channel sees them. If its channel cannot be found, they go to the approvals channel with a note.">
         <AgentChannels agents={agents} channels={setup.data?.channels ?? []}
           value={Array.isArray(config.agentChannels) ? (config.agentChannels as AgentChannel[]) : []}
           onChange={(next) => set({ agentChannels: next })} />

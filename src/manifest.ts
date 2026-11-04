@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "mattermost-bridge",
   apiVersion: 1,
-  version: "0.27.0",
+  version: "0.28.0",
   displayName: "Mattermost",
   description:
     "Every agent becomes its own Mattermost bot. DM an agent or mention it in a channel and it answers in the thread, showing its steps as it works; follow-ups continue the conversation. Paperclip approvals arrive with Approve / Reject buttons.",
@@ -98,8 +98,8 @@ const manifest: PaperclipPluginManifestV1 = {
       agentChannels: {
         type: "array",
         title: "Channel per agent",
-        description: "Agents whose approvals, decision cards and help requests go to their own channel instead of the approvals channel.",
-        items: { type: "object", properties: { agentId: { type: "string" }, channel: { type: "string" } }, required: ["agentId", "channel"] },
+        description: "Agents whose approvals, decision cards, help requests and routine alerts go to their own channel instead of the approvals channel. Tick routineResults to also post each finished routine run there.",
+        items: { type: "object", properties: { agentId: { type: "string" }, channel: { type: "string" }, routineResults: { type: "boolean", title: "Post finished routine runs here too" } }, required: ["agentId", "channel"] },
       },
       agentsMode: {
         type: "string",

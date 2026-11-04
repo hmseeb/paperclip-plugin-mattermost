@@ -39,6 +39,15 @@ export function parseAgentChannels(value: unknown): Record<string, string> {
   return out;
 }
 
+/** Agents whose channel row asks for their finished routine runs to be posted too. */
+export function parseRoutineResults(value: unknown): Set<string> {
+  const out = new Set<string>();
+  if (Array.isArray(value)) for (const r of value as { agentId?: unknown; routineResults?: unknown }[]) {
+    if (typeof r?.agentId === "string" && r.routineResults === true) out.add(r.agentId);
+  }
+  return out;
+}
+
 export function decisionChannels(poster: Pick<ApprovalPoster, "channel">, perAgent: Record<string, string>, fallback: string): ChannelFor {
   return async (agentId) => {
     const own = agentId ? perAgent[agentId] : undefined;

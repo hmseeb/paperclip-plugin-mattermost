@@ -32,6 +32,21 @@ const STATUS_WORDS: Record<string, string> = {
   todo: "to do", in_progress: "in progress", in_review: "in review", blocked: "blocked", backlog: "in the backlog", done: "done", cancelled: "cancelled",
 };
 
+/**
+ * A task's last comment, waiting a few seconds for one written with the status change: an agent
+ * finishing with "done + comment" in one call has the status saved (and announced) before the comment.
+ */
+export async function finalComment(list: () => Promise<TaskComment[]>, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))): Promise<TaskComment | undefined> {
+  const changedAt = Date.now() - FRESH_MS;
+  const fresh = (c?: TaskComment) => Boolean(c?.createdAt && new Date(c.createdAt).getTime() >= changedAt);
+  let got = await list();
+  for (let i = 0; i < 8 && !fresh(got.at(-1)); i++) {
+    await sleep(1000);
+    got = await list();
+  }
+  return got.at(-1);
+}
+
 export interface TaskComment { id: string; body: string; authorAgentId?: string | null; createdAt?: string | Date }
 export interface WorkDeps {
   store: { get<T>(k: string): Promise<T | null>; set(k: string, v: unknown): Promise<void> };
@@ -153,20 +168,8 @@ export class WorkLinks {
     }
   }
 
-  /**
-   * The task's last comment, waiting a few seconds for one written with the status change: an agent
-   * finishing with "done + comment" in one call has the status saved (and announced) before the comment.
-   */
-  private async finalComment(issueId: string): Promise<TaskComment | undefined> {
-    const changedAt = Date.now() - FRESH_MS;
-    const fresh = (c?: TaskComment) => Boolean(c?.createdAt && new Date(c.createdAt).getTime() >= changedAt);
-    const sleep = this.d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    let list = await this.d.comments(issueId);
-    for (let i = 0; i < 8 && !fresh(list.at(-1)); i++) {
-      await sleep(1000);
-      list = await this.d.comments(issueId);
-    }
-    return list.at(-1);
+  private finalComment(issueId: string): Promise<TaskComment | undefined> {
+    return finalComment(() => this.d.comments(issueId), this.d.sleep);
   }
 
   /** The task changed: note a new status; on done or cancelled, report back (the channel stays open). */

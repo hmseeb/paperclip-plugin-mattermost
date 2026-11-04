@@ -2,7 +2,7 @@ import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin
 import { createHmac } from "node:crypto";
 import { Cards } from "./interactions.ts";
 import { choiceProps, chosenProps, verifyChoice, type ChoiceContext } from "./choices.ts";
-import { Approvals, decisionChannels, parseAgentChannels, parseApprovers, sign, signed, type ActionRequest, type ApprovalPoster, type ChannelFor } from "./approvals.ts";
+import { Approvals, decisionChannels, parseAgentChannels, parseApprovers, parseRoutineResults, sign, signed, type ActionRequest, type ApprovalPoster, type ChannelFor } from "./approvals.ts";
 import { Actions, type PendingRequest } from "./actions.ts";
 import { WorkLinks, FROM_PAPERCLIP } from "./worklinks.ts";
 import { HELP } from "./help.ts";
@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { absoluteLinks, Bridge, DEFAULT_TURN_LIMIT, linkTasks, type Agents, type Directory, type PostedEvent, type Store } from "./bridge.ts";
 import { accessCheck } from "./access.ts";
 import { AutoChannels } from "./autochannels.ts";
+import { ROUTINE, RoutineReports } from "./routines.ts";
 import { MattermostClient } from "./mattermost.ts";
 import { detached } from "./detach.ts";
 import { diskFiles } from "./files.ts";
@@ -22,6 +23,7 @@ const ASK_TIMEOUT_MS = 30 * 60 * 1000;
 const PLUGIN_KEY = manifest.id;
 const SYNC_EVERY_MS = 5 * 60 * 1000;
 const CARDS_EVERY_MS = 60_000;
+const ROUTINES_EVERY_MS = 10 * 60_000;
 const OPEN_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"] as const;
 // Every company's settings, saved by onConfigChanged so a worker the host restarts
 // after a crash (which gets no config replay) can start them all again.
@@ -69,6 +71,7 @@ class Tenant {
   actions: Actions | null = null;
   work: WorkLinks | null = null;
   auto: AutoChannels | null = null;
+  routines: RoutineReports | null = null;
   key = "";
   private approvers = new Map<string, string>();
   private paperclipUrl = "";
@@ -211,12 +214,7 @@ class Tenant {
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
       agentName, store, actionUrl, key, paperclipUrl, channelFor, approvers,
       threadOf: (issueId) => store.get<{ channelId: string; rootId: string; agentId?: string }>(`issuethread:${issueId}`),
-      mention: async (userId) => {
-        const p = people.get(userId);
-        if (!p) return null;
-        const u = await manager.request<{ username: string }>("GET", `/users/email/${encodeURIComponent(p.email)}`).catch(() => null);
-        return u ? `@${u.username}` : p.name ?? null;
-      },
+      mention: (userId) => mention(userId),
       openDialog: async (triggerId, dialog) => { await manager.request("POST", "/actions/dialogs/open", { trigger_id: triggerId, url: actionUrl, dialog }); },
     }) : null;
     const poster = this.poster(manager, roster);
@@ -225,6 +223,12 @@ class Tenant {
     for (const p of [...(Array.isArray(config.allowedUsers) ? config.allowedUsers : []), ...(Array.isArray(config.approvers) ? config.approvers : [])] as { userId?: string; email?: string; name?: string }[]) {
       if (p?.userId && p.email) people.set(p.userId, { email: p.email.toLowerCase(), name: p.name });
     }
+    const mention = async (userId: string) => {
+      const p = people.get(userId);
+      if (!p) return null;
+      const u = await manager.request<{ username: string }>("GET", `/users/email/${encodeURIComponent(p.email)}`).catch(() => null);
+      return u ? `@${u.username}` : p.name ?? null;
+    };
     const actions = new Actions({
       bot: (agentId) => roster.clientOf(agentId),
       manager,
@@ -307,7 +311,21 @@ class Tenant {
         await as.request("POST", "/posts", { channel_id: channelId, message: linkTasks(absoluteLinks(text, paperclipUrl), paperclipUrl, bridge.taskPrefix), props: FROM_PAPERCLIP });
       },
     });
-    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, auto, key, approvers, paperclipUrl, channelFor });
+    const routineResults = parseRoutineResults(config.agentChannels);
+    const routines = new RoutineReports({
+      store,
+      task: async (issueId) => (await ctx.issues.get(issueId, companyId)) as never,
+      comments: async (issueId) => (await oldestFirst(issueId)).map((c) => ({ id: c.id, body: c.body, authorAgentId: c.authorAgentId, createdAt: c.createdAt })),
+      runs: async () => (await ctx.issues.list({ companyId, originKindPrefix: ROUTINE, limit: 500 })) as never,
+      channelFor: (agentId) => channelFor(agentId),
+      postsResults: (agentId) => routineResults.has(agentId),
+      post: async (agentId, channelId, text) => {
+        const as = roster.clientOf(agentId) ?? manager;
+        await as.request("POST", "/posts", { channel_id: channelId, message: linkTasks(absoluteLinks(text, paperclipUrl), paperclipUrl, bridge.taskPrefix), props: FROM_PAPERCLIP });
+      },
+      mention, agentName: (agentId) => agentName(agentId),
+    });
+    Object.assign(this, { manager, bots: roster, bridge, approvals, cards, actions, work, auto, routines, key, approvers, paperclipUrl, channelFor });
     this.status = `connecting to ${url} as @${manager.botUsername}`;
     // Everything below runs from Mattermost sockets and timers, outside this invocation.
     detached(() => {
@@ -322,6 +340,9 @@ class Tenant {
         .catch((err) => warn("could not resume interrupted replies", { err: errText(err) }));
       this.timers.push(setInterval(sync, SYNC_EVERY_MS));
       void ensureSkill(companyId).catch((err) => warn("could not install the Mattermost skill", { err: errText(err) }));
+      // Routines that missed their usual time: soon after a (re)start, then every 10 minutes.
+      const missed = () => routines.checkMissed().catch((err) => warn("routine check failed", { err: errText(err) }));
+      this.timers.push(setTimeout(missed, 60_000), setInterval(missed, ROUTINES_EVERY_MS));
       if (cards) {
         const poll = () => cards.poll().catch((err) => warn("decision cards poll failed", { err: errText(err) }));
         this.timers.push(setTimeout(poll, 20_000), setInterval(poll, CARDS_EVERY_MS));
@@ -334,7 +355,7 @@ class Tenant {
     this.timers = [];
     this.bots?.close();
     this.manager?.close();
-    Object.assign(this, { manager: null, bots: null, bridge: null, approvals: null, cards: null, actions: null, work: null, auto: null });
+    Object.assign(this, { manager: null, bots: null, bridge: null, approvals: null, cards: null, actions: null, work: null, auto: null, routines: null });
   }
 
   /** Approve / Reject on an agent's ask-first request (a broadcast, a public channel, an invite). */
@@ -536,6 +557,7 @@ const plugin = definePlugin({
       await work?.updated(e.entityId);
       await work?.threadUpdate(e.entityId);
       await tenants.get(e.companyId)?.auto?.changed(e.entityId);
+      await tenants.get(e.companyId)?.routines?.updated(e.entityId);
     }));
     ctx.events.on("plugin.agent-computer.needs-person", (e) => quietly("could not post a computer help request", async () => {
       await tenants.get(e.companyId)?.computerNeedsPerson((e.payload ?? {}) as never);
