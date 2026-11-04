@@ -34,7 +34,8 @@ export interface RoutineDeps {
   comments(issueId: string): Promise<TaskComment[]>;
   /** Recent routine tasks, any order. */
   runs(): Promise<RoutineTask[]>;
-  channelFor(agentId: string): Promise<{ channelId: string } | null>;
+  /** The agent's channel, else the approvals channel (with a note when its own channel is missing). */
+  channelFor(agentId: string): Promise<{ channelId: string; note?: string } | null>;
   /** Whether this agent's finished routine runs are posted too. */
   postsResults(agentId: string): boolean;
   post(agentId: string, channelId: string, text: string): Promise<void>;
@@ -85,7 +86,7 @@ export class RoutineReports {
       text = `${head}${latest ? `\n\n${latest.length > MAX_POST ? latest.slice(0, MAX_POST) + "…" : latest}` : ""}`;
     }
     try {
-      await this.d.post(agentId, where.channelId, text);
+      await this.d.post(agentId, where.channelId, where.note ? `${text}\n_${where.note}_` : text);
     } catch (err) {
       await this.d.store.set(key, before); // not posted: the next update tries again
       throw err;

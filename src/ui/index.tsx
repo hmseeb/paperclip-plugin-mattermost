@@ -176,13 +176,16 @@ function AgentChannels({ agents, channels, value, onChange }: { agents: AgentRow
   return (
     <div style={{ display: "grid", gap: 6 }}>
       {value.map((r) => (
-        <div key={r.agentId} style={s.row}>
-          <span style={{ minWidth: 160 }}>{named(r.agentId)}</span>
-          {picker(r)}
-          <label style={{ whiteSpace: "nowrap" }} title="Routine runs post here only when they need someone. Tick to also post every finished run (for routines whose output is the point, like a daily report).">
-            <input type="checkbox" checked={Boolean(r.routineResults)} onChange={(e) => update(r.agentId, { routineResults: e.target.checked })} /> post routine results
+        <div key={r.agentId} style={{ ...s.member, display: "grid", gap: 8, cursor: "default" }}>
+          <div style={s.row}>
+            <span style={{ minWidth: 160, fontWeight: 600 }}>{named(r.agentId)}</span>
+            {picker(r)}
+            <button style={{ ...s.button, padding: "4px 9px" }} title="Use the approvals channel" onClick={() => onChange(value.filter((x) => x.agentId !== r.agentId))}>✕</button>
+          </div>
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer", fontSize: 13 }}>
+            <input type="checkbox" style={{ margin: "2px 0 0" }} checked={Boolean(r.routineResults)} onChange={(e) => update(r.agentId, { routineResults: e.target.checked })} />
+            <span>Post every finished routine run here<span style={{ ...s.help, display: "block" }}>Blocked and missed runs are always posted. Tick this for routines whose output is the point, like a daily report.</span></span>
           </label>
-          <button style={{ ...s.button, padding: "4px 9px" }} title="Use the approvals channel" onClick={() => onChange(value.filter((x) => x.agentId !== r.agentId))}>✕</button>
         </div>
       ))}
       {free.length ? (
