@@ -266,7 +266,10 @@ class Tenant {
       post: async (agentId, channelId, rootId, text) => {
         const as = roster.clientOf(agentId) ?? manager;
         const message = linkTasks(absoluteLinks(text, paperclipUrl), paperclipUrl, bridge.taskPrefix);
-        await as.request("POST", "/posts", { channel_id: channelId, root_id: rootId, message, props: FROM_PAPERCLIP });
+        return (await as.request<{ id: string }>("POST", "/posts", { channel_id: channelId, root_id: rootId, message, props: FROM_PAPERCLIP })).id;
+      },
+      edit: async (postId, text) => {
+        await manager.request("PUT", `/posts/${postId}/patch`, { message: linkTasks(absoluteLinks(text, paperclipUrl), paperclipUrl, bridge.taskPrefix) });
       },
       hasBot: (agentId) => Boolean(roster.clientOf(agentId)),
       agentName: (agentId) => agentName(agentId),
@@ -524,6 +527,7 @@ const plugin = definePlugin({
     ctx.events.on("issue.comment.created", (e) => quietly("could not mirror a task comment", async () => {
       const commentId = (e.payload as { commentId?: string } | undefined)?.commentId;
       if (e.entityId && commentId) await tenants.get(e.companyId)?.work?.comment(e.entityId, commentId);
+      if (e.entityId) await tenants.get(e.companyId)?.work?.threadUpdate(e.entityId); // the progress card shows the new comment
       if (e.entityId) await tenants.get(e.companyId)?.auto?.changed(e.entityId); // a comment can name people to add
     }));
     ctx.events.on("issue.updated", (e) => quietly("could not follow a task update", async () => {

@@ -15,6 +15,7 @@ Your [Paperclip](https://github.com/paperclipai/paperclip) agents as Mattermost 
 - **Access control.** Choose who may talk to agents: everyone, or only the people you pick. Each person can be limited to some agents, and people outside Paperclip can be added by email.
 - **Agents work in Mattermost themselves.** Through plugin API routes that only agents can call, each agent reads the channels its bot is in, posts, reacts, searches, and DMs the people allowed to talk to it, always as its own bot. Each company gets a Mattermost skill that tells agents how, and saving the settings adds it to every agent with a bot, so they can message people from tasks and scheduled runs too.
 - **Work happens in Paperclip tasks.** Asked to do something, an agent creates a Paperclip task, replies with its number, and does the work there. When the task is done, cancelled or blocked, its outcome is posted back in the thread it was asked in.
+- **Progress in the thread.** While a task asked for in a thread runs, one card in that thread shows where it stands, who is on it and its latest comment, edited in place (edits notify nobody). When it ends the card points to the result, which arrives as a new post.
 - **Steering.** A message you send in a thread while its agent is still working reaches that run: the agent reads it between steps (and an agent waiting at its computer stops waiting to read it), so "stop" or a correction lands mid-task. One it read is marked ✅ and not run again.
 - **Agents work with agents.** An agent mentioning another agent starts it, and it answers in the thread. After a set number of agent-to-agent messages in a thread (10 by default, set in settings), they pause until a person replies.
 - **Work channels.** For an investigation, incident or project, an agent opens a private channel (`inc-checkout-5xx`), pulls in the people and agents it needs, and ties it to a Paperclip task. Task comments and status changes show up in the channel. When the task is done or cancelled, the outcome is posted back where the work was asked for; the channel stays open.
@@ -88,7 +89,7 @@ PAPERCLIP_REF=<commit> node build.mjs   # build for another Paperclip version
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag -a v0.26.2 -m v0.26.2 && git push origin main v0.26.2
+git tag -a v0.27.0 -m v0.27.0 && git push origin main v0.27.0
 ```
 
 GitHub Actions builds, tests and publishes to npm through npm trusted publishing, so no npm token is involved.

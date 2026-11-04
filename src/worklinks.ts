@@ -11,6 +11,23 @@ const MAX_POST = 15000;
 /** A comment this recent counts as written with the status change. */
 const FRESH_MS = 15_000;
 const THREAD_REPORTS: Record<string, string> = { done: ":white_check_mark: Done:", cancelled: ":no_entry_sign: Cancelled:", blocked: ":pause_button: Blocked:" };
+const PROGRESS: Record<string, string> = {
+  backlog: ":inbox_tray: Backlog", todo: ":hourglass_flowing_sand: Queued", in_progress: ":arrows_counterclockwise: In progress",
+  in_review: ":eyes: In review", blocked: ":pause_button: Blocked", done: ":white_check_mark: Done", cancelled: ":no_entry_sign: Cancelled",
+};
+
+/** The progress card: status, task, who is on it; its latest comment while it runs, a pointer to the result once it ends. */
+export function progressText(task: { identifier?: string | null; title: string; status: string; assigneeAgentId?: string | null }, latest: TaskComment | undefined, agentName: (id: string) => string): string {
+  const who = task.assigneeAgentId ? ` · ${agentName(task.assigneeAgentId)}` : "";
+  const head = `${PROGRESS[task.status] ?? task.status} · **${task.identifier ?? "The task"}** ${task.title}${who}`;
+  if (THREAD_REPORTS[task.status]) return `${head}\n_The result is below._`;
+  const body = latest?.body?.trim();
+  if (!body) return head;
+  const author = latest!.authorAgentId ? agentName(latest!.authorAgentId) : "A team member";
+  const excerpt = body.length > 600 ? body.slice(0, 600) + "…" : body;
+  return `${head}\n> **${author}:** ${excerpt.replace(/\n+/g, "\n> ")}`;
+}
+
 const STATUS_WORDS: Record<string, string> = {
   todo: "to do", in_progress: "in progress", in_review: "in review", blocked: "blocked", backlog: "in the backlog", done: "done", cancelled: "cancelled",
 };
@@ -19,7 +36,9 @@ export interface TaskComment { id: string; body: string; authorAgentId?: string 
 export interface WorkDeps {
   store: { get<T>(k: string): Promise<T | null>; set(k: string, v: unknown): Promise<void> };
   /** Posts as the agent's bot (null: the linked agent's). */
-  post(agentId: string, channelId: string, rootId: string, text: string): Promise<void>;
+  post(agentId: string, channelId: string, rootId: string, text: string): Promise<string | void>;
+  /** Rewrites a post (the progress card); editing notifies nobody. */
+  edit?(postId: string, text: string): Promise<void>;
   hasBot(agentId: string): boolean;
   agentName(agentId: string): string;
   channelName(channelId: string): Promise<string>;
@@ -76,8 +95,40 @@ export class WorkLinks {
    * done, cancelled or blocked, its outcome (the last comment) is posted back in that thread, so the
    * result always reaches the conversation it came from.
    */
+  /** The task changed, or got a comment: its progress card in the thread, then (once) its result. */
   threadUpdate(issueId: string): Promise<void> {
-    return this.serial(`thread:${issueId}`, () => this.reportToThread(issueId));
+    return this.serial(`thread:${issueId}`, async () => {
+      await this.progress(issueId).catch(() => {}); // a card that fails to update never blocks the result
+      await this.reportToThread(issueId);
+    });
+  }
+
+  /**
+   * One card in the thread a task was asked for in, edited as the task moves: where it stands, who is on
+   * it, and its latest comment. Edits notify nobody; the result itself still arrives as a new post.
+   */
+  private async progress(issueId: string): Promise<void> {
+    if (!this.d.edit) return;
+    const at = await this.d.store.get<{ channelId: string; rootId: string; agentId?: string }>(`issuethread:${issueId}`);
+    if (!at) return;
+    const task = await this.d.task(issueId);
+    if (!task) return;
+    const card = await this.d.store.get<{ postId: string; text: string }>(`progress:${issueId}`);
+    const comments = await this.d.comments(issueId);
+    const closed = Boolean(THREAD_REPORTS[task.status]);
+    // Started: picked up (out of the queue) or commented on. A task that finishes before that needs no card.
+    if (!card && (closed || (["backlog", "todo"].includes(task.status) && !comments.length))) return;
+    const by = [at.agentId, task.assigneeAgentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
+    if (!by) return;
+    const text = progressText(task, closed ? undefined : comments.at(-1), (id) => this.d.agentName(id));
+    if (card?.text === text) return;
+    if (card) {
+      await this.d.edit(card.postId, text);
+      await this.d.store.set(`progress:${issueId}`, { ...card, text });
+    } else {
+      const postId = await this.d.post(by, at.channelId, at.rootId, text);
+      if (postId) await this.d.store.set(`progress:${issueId}`, { postId, text });
+    }
   }
 
   private async reportToThread(issueId: string): Promise<void> {

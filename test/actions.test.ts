@@ -289,3 +289,54 @@ test("a work channel whose task was asked for in a thread reports there once (th
   await work.updated("i");
   assert.deepEqual(posts.map((p) => p.channelId), ["chan"], "only the note in the channel; the thread report comes from threadUpdate");
 });
+
+test("progress card: one post in the thread, edited as the task moves; the result still arrives as a new post", async () => {
+  const store = new Map<string, unknown>([["issuethread:i", { channelId: "dm", rootId: "r", agentId: "a-ceo", status: "todo" }]]);
+  const posts: { id: string; text: string }[] = [];
+  const edits: { id: string; text: string }[] = [];
+  let status = "todo";
+  const comments: TaskComment[] = [];
+  const work = new WorkLinks({
+    sleep: async () => {},
+    store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
+    post: async (_as, _c, _r, text) => { const id = `p${posts.length + 1}`; posts.push({ id, text }); return id; },
+    edit: async (id, text) => { edits.push({ id, text }); },
+    hasBot: () => true, agentName: (id) => ({ "a-ceo": "CEO", "a-rep": "Client Reporting" } as Record<string, string>)[id] ?? id, channelName: async () => "",
+    task: async () => ({ identifier: "BAD-1387", title: "Restore client reporting", status, assigneeAgentId: "a-rep" }),
+    comments: async () => [...comments],
+  });
+  await work.threadUpdate("i");
+  assert.equal(posts.length, 0, "still queued, nothing said: no card");
+  status = "in_progress";
+  await work.threadUpdate("i");
+  assert.deepEqual(posts.map((p) => p.text), [":arrows_counterclockwise: In progress · **BAD-1387** Restore client reporting · Client Reporting"]);
+  comments.push({ id: "k1", body: "Retrieved the Oct 29 drafts.\nNov 2/3 produced zero.", authorAgentId: "a-ceo", createdAt: new Date() });
+  await work.threadUpdate("i");
+  await work.threadUpdate("i"); // nothing new: no edit
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].id, "p1");
+  assert.match(edits[0].text, /\n> \*\*CEO:\*\* Retrieved the Oct 29 drafts\.\n> Nov 2\/3 produced zero\.$/);
+  comments.push({ id: "k2", body: "Recovery complete; drafts linked.", authorAgentId: "a-rep", createdAt: new Date() });
+  status = "done";
+  await work.threadUpdate("i");
+  assert.match(edits.at(-1)!.text, /^:white_check_mark: Done · \*\*BAD-1387\*\*.*\n_The result is below\._$/);
+  assert.equal(posts.length, 2, "card + result");
+  assert.match(posts[1].text, /^Recovery complete; drafts linked\.\n\n:white_check_mark: Done: \*\*BAD-1387\*\*/);
+});
+
+test("progress card: a task that finishes before it ever starts gets just its result", async () => {
+  const store = new Map<string, unknown>([["issuethread:i", { channelId: "dm", rootId: "r", agentId: "a-ceo", status: "todo" }]]);
+  const posts: string[] = [];
+  const work = new WorkLinks({
+    sleep: async () => {},
+    store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k, v) => { store.set(k, v); } },
+    post: async (_as, _c, _r, text) => { posts.push(text); return "x"; },
+    edit: async () => {},
+    hasBot: () => true, agentName: (id) => id, channelName: async () => "",
+    task: async () => ({ identifier: "BAD-9", title: "Quick", status: "done", assigneeAgentId: "a-ceo" }),
+    comments: async () => [{ id: "k", body: "Done quickly.", createdAt: new Date() }],
+  });
+  await work.threadUpdate("i");
+  assert.deepEqual(posts.length, 1);
+  assert.match(posts[0], /^Done quickly\./);
+});
