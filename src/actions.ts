@@ -264,7 +264,25 @@ export class Actions {
     if (task.status === "done" || task.status === "cancelled") return bad(409, `${task.identifier ?? ref} is ${task.status}; a comment does not restart it. Ask the person to reopen it in Paperclip, or create a new task.`);
     const agent = this.d.agents().find((a) => a.agentId === agentId)?.agentName ?? "an agent";
     await this.d.comment(task.id, `**From Mattermost, relayed by ${agent} on behalf of @${who.username}:**\n\n${message}`, who.userId);
-    return ok({ nudged: task.identifier ?? task.id, as: `@${who.username}`, next: "The task's agent is woken for this comment (unless the task waits on another unfinished task). Its result comes back to the thread it was asked for in." });
+    await this.follow(task.id, task.status, agentId);
+    return ok({ nudged: task.identifier ?? task.id, as: `@${who.username}`, next: "The task's agent is woken for this comment (unless the task waits on another unfinished task). Its progress and result come back to this thread (and to the thread it was first asked in)." });
+  }
+
+  /**
+   * This thread follows the task: its progress card and result are posted here too. The first thread
+   * a task is linked to is `issuethread:`; later ones, from nudges in other threads, are followers.
+   */
+  private async follow(issueId: string, status: string | undefined, agentId: string): Promise<void> {
+    const at = this.d.origin(agentId);
+    if (!at) return;
+    const here = { channelId: at.channelId, rootId: at.rootId, agentId, status };
+    const first = await this.d.store.get<{ rootId: string }>(`issuethread:${issueId}`);
+    if (!first) return void (await this.d.store.set(`issuethread:${issueId}`, here));
+    if (first.rootId === at.rootId) return;
+    const roots = (await this.d.store.get<string[]>(`issuefollows:${issueId}`)) ?? [];
+    if (roots.includes(at.rootId)) return;
+    await this.d.store.set(`issuefollow:${issueId}:${at.rootId}`, here);
+    await this.d.store.set(`issuefollows:${issueId}`, [...roots, at.rootId]);
   }
 
   // ---- channels ----------------------------------------------------------------------

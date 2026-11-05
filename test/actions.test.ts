@@ -340,3 +340,55 @@ test("progress card: a task that finishes before it ever starts gets just its re
   assert.deepEqual(posts.length, 1);
   assert.match(posts[0], /^Done quickly\./);
 });
+
+test("a nudge from another thread makes that thread follow the task: its card and result go there too", async () => {
+  const store = new Map<string, unknown>([["issuethread:t-1127", { channelId: "old-ch", rootId: "old-root", agentId: "a-cto", status: "in_review" }]]);
+  const fakeStore = { get: async <T,>(k: string) => (store.has(k) ? structuredClone(store.get(k)) : null) as T | null, set: async (k: string, v: unknown) => { store.set(k, v); } };
+  let status = "in_review";
+  const comments: { id: string; body: string; authorAgentId?: string; createdAt: Date }[] = [];
+  const actions = new Actions({
+    bot: () => ({}) as never, manager: {} as never, agents: () => [{ agentId: "a-cto", agentName: "CTO", username: "cto", botUserId: "b-cto" }],
+    canTalk: async () => true, format: (t: string) => t, store: fakeStore, newId: () => "x",
+    origin: () => ({ channelId: "new-ch", rootId: "new-root", askedBy: "mm-haseeb" }),
+    task: async () => ({ id: "t-1127", identifier: "BAD-1127", title: "Domain", status }),
+    person: async () => ({ userId: "u-haseeb", username: "haseebazhar" }),
+    comment: async (_i: string, body: string) => { comments.push({ id: `c${comments.length}`, body, createdAt: new Date() }); },
+  } as never);
+  assert.equal((await actions.handle("a-cto", "nudge", { task: "BAD-1127" }, { message: "new target" })).status, 200);
+  await actions.handle("a-cto", "nudge", { task: "BAD-1127" }, { message: "again" }); // once is enough
+  assert.deepEqual(store.get("issuefollows:t-1127"), ["new-root"]);
+
+  const posts: { channelId: string; rootId: string; text: string }[] = [];
+  const edits: string[] = [];
+  const work = new WorkLinks({
+    sleep: async () => {}, store: fakeStore,
+    post: async (_as, channelId, rootId, text) => { posts.push({ channelId, rootId, text }); return `p${posts.length}`; },
+    edit: async (_id, text) => { edits.push(text); },
+    hasBot: () => true, agentName: (id) => id.slice(2).toUpperCase(), channelName: async () => "",
+    task: async () => ({ identifier: "BAD-1127", title: "Domain", status, assigneeAgentId: "a-cto" }),
+    comments: async () => comments,
+  });
+  await work.threadUpdate("t-1127");
+  assert.deepEqual(posts.map((p) => p.rootId).sort(), ["new-root", "old-root"], "a progress card in each thread");
+  status = "done";
+  comments.push({ id: "c9", body: "cap.badaaas.com is live.", authorAgentId: "a-cto", createdAt: new Date() });
+  await work.threadUpdate("t-1127");
+  const results = posts.filter((p) => p.text.startsWith("cap.badaaas.com is live."));
+  assert.deepEqual(results.map((p) => p.rootId).sort(), ["new-root", "old-root"], "the result in each thread, once");
+  await work.threadUpdate("t-1127");
+  assert.equal(posts.filter((p) => p.text.startsWith("cap.badaaas.com is live.")).length, 2);
+});
+
+test("a nudge on a task no thread asked for links it to this thread", async () => {
+  const store = new Map<string, unknown>();
+  const actions = new Actions({
+    bot: () => ({}) as never, manager: {} as never, agents: () => [], canTalk: async () => true, format: (t: string) => t, newId: () => "x",
+    store: { get: async <T,>(k: string) => (store.get(k) ?? null) as T | null, set: async (k: string, v: unknown) => { store.set(k, v); } },
+    origin: () => ({ channelId: "ch", rootId: "root", askedBy: "mm-x" }),
+    task: async () => ({ id: "t-5", identifier: "BAD-5", title: "T", status: "todo" }),
+    person: async () => ({ userId: "u-x", username: "x" }), comment: async () => {},
+  } as never);
+  await actions.handle("a-cto", "nudge", { task: "BAD-5" }, { message: "go" });
+  assert.deepEqual(store.get("issuethread:t-5"), { channelId: "ch", rootId: "root", agentId: "a-cto", status: "todo" });
+  assert.equal(store.get("issuefollows:t-5"), undefined);
+});

@@ -62,6 +62,9 @@ export interface WorkDeps {
   sleep?(ms: number): Promise<void>;
 }
 
+/** Where a task reports: the store key of the thread, and of its progress card there. */
+interface ThreadTarget { key: string; card: string }
+
 type Linked = WorkLink & { status?: string; closed?: boolean };
 
 export class WorkLinks {
@@ -113,22 +116,36 @@ export class WorkLinks {
   /** The task changed, or got a comment: its progress card in the thread, then (once) its result. */
   threadUpdate(issueId: string): Promise<void> {
     return this.serial(`thread:${issueId}`, async () => {
-      await this.progress(issueId).catch(() => {}); // a card that fails to update never blocks the result
-      await this.reportToThread(issueId);
+      let failed: unknown = null;
+      for (const t of await this.threads(issueId)) {
+        await this.progress(issueId, t).catch(() => {}); // a card that fails to update never blocks the result
+        // One thread failing does not stop the others; the first failure is still reported.
+        await this.reportToThread(issueId, t).catch((err) => { failed ??= err; });
+      }
+      if (failed) throw failed;
     });
+  }
+
+  /** The thread a task was asked for in, then threads that follow it (nudged from there). */
+  private async threads(issueId: string): Promise<ThreadTarget[]> {
+    const out: ThreadTarget[] = [{ key: `issuethread:${issueId}`, card: `progress:${issueId}` }];
+    for (const root of (await this.d.store.get<string[]>(`issuefollows:${issueId}`)) ?? []) {
+      out.push({ key: `issuefollow:${issueId}:${root}`, card: `progress:${issueId}:${root}` });
+    }
+    return out;
   }
 
   /**
    * One card in the thread a task was asked for in, edited as the task moves: where it stands, who is on
    * it, and its latest comment. Edits notify nobody; the result itself still arrives as a new post.
    */
-  private async progress(issueId: string): Promise<void> {
+  private async progress(issueId: string, target: ThreadTarget): Promise<void> {
     if (!this.d.edit) return;
-    const at = await this.d.store.get<{ channelId: string; rootId: string; agentId?: string }>(`issuethread:${issueId}`);
+    const at = await this.d.store.get<{ channelId: string; rootId: string; agentId?: string }>(target.key);
     if (!at) return;
     const task = await this.d.task(issueId);
     if (!task) return;
-    const card = await this.d.store.get<{ postId: string; text: string }>(`progress:${issueId}`);
+    const card = await this.d.store.get<{ postId: string; text: string }>(target.card);
     const comments = await this.d.comments(issueId);
     const closed = Boolean(THREAD_REPORTS[task.status]);
     // Started: picked up (out of the queue) or commented on. A task that finishes before that needs no card.
@@ -139,22 +156,22 @@ export class WorkLinks {
     if (card?.text === text) return;
     if (card) {
       await this.d.edit(card.postId, text);
-      await this.d.store.set(`progress:${issueId}`, { ...card, text });
+      await this.d.store.set(target.card, { ...card, text });
     } else {
       const postId = await this.d.post(by, at.channelId, at.rootId, text);
-      if (postId) await this.d.store.set(`progress:${issueId}`, { postId, text });
+      if (postId) await this.d.store.set(target.card, { postId, text });
     }
   }
 
-  private async reportToThread(issueId: string): Promise<void> {
-    const at = await this.d.store.get<{ channelId: string; rootId: string; agentId?: string; status?: string }>(`issuethread:${issueId}`);
+  private async reportToThread(issueId: string, target: ThreadTarget): Promise<void> {
+    const at = await this.d.store.get<{ channelId: string; rootId: string; agentId?: string; status?: string }>(target.key);
     if (!at) return;
     const task = await this.d.task(issueId);
     if (!task || task.status === at.status || !THREAD_REPORTS[task.status]) return;
     // The agent the thread is with posts: another agent's bot is not in that DM or channel (403).
     const by = [at.agentId, task.assigneeAgentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
     if (!by) return;
-    await this.d.store.set(`issuethread:${issueId}`, { ...at, status: task.status });
+    await this.d.store.set(target.key, { ...at, status: task.status });
     const last = (await this.finalComment(issueId))?.body?.trim();
     const doer = task.assigneeAgentId && task.assigneeAgentId !== by ? ` _(by ${this.d.agentName(task.assigneeAgentId)})_` : "";
     const status = `${THREAD_REPORTS[task.status]} **${task.identifier ?? "The task"}** ${task.title}${doer}`;
@@ -163,7 +180,7 @@ export class WorkLinks {
     try {
       await this.d.post(by, at.channelId, at.rootId, text);
     } catch (err) {
-      await this.d.store.set(`issuethread:${issueId}`, at); // not reported: the next update tries again
+      await this.d.store.set(target.key, at); // not reported: the next update tries again
       throw err;
     }
   }
