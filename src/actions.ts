@@ -32,6 +32,8 @@ export interface ActionDeps {
   task(taskId: string): Promise<{ id: string; identifier?: string | null; title: string; status?: string } | null>;
   /** The Paperclip user a Mattermost person is (by the emails in the plugin settings), and their username. */
   person?(mattermostUserId: string): Promise<{ userId: string | null; username: string }>;
+  /** A step an agent reports on a task: shown on the task's progress card in its threads. */
+  step?(issueId: string, text: string): Promise<void>;
   /** A comment on a task written as a person: Paperclip wakes the task's agent for it. */
   comment?(issueId: string, body: string, actorUserId: string): Promise<void>;
   /** Posts an Approve / Reject card for a request; returns nothing, the card carries the id. */
@@ -98,6 +100,7 @@ export class Actions {
         case "update-channel": return await this.updateChannel(agentId, bot, params.channel, input);
         case "archive": return await this.archive(agentId, bot, params.channel);
         case "nudge": return await this.nudge(agentId, params.task, input);
+        case "step": return await this.step(params.task, input);
         case "request": return ok(await this.d.store.get<PendingRequest>(`req:${params.id}`) ?? { error: "no such request" });
         default: return bad(404, `unknown action ${routeKey}`);
       }
@@ -266,6 +269,19 @@ export class Actions {
     await this.d.comment(task.id, `**From Mattermost, relayed by ${agent} on behalf of @${who.username}:**\n\n${message}`, who.userId);
     await this.follow(task.id, task.status, agentId);
     return ok({ nudged: task.identifier ?? task.id, as: `@${who.username}`, next: "The task's agent is woken for this comment (unless the task waits on another unfinished task). Its progress and result come back to this thread (and to the thread it was first asked in)." });
+  }
+
+  /** The step an agent is starting on a task, for the progress card people see in Mattermost. */
+  private async step(ref: string, input: Record<string, unknown>): Promise<Result> {
+    const text = str(input.text).replace(/\s+/g, " ");
+    if (!text) return bad(400, "text is required: the step you are starting, in a few words");
+    if (text.length > 200) return bad(400, "text is too long: a few words, 200 characters at most");
+    if (!this.d.step) return bad(501, "Steps are not available here.");
+    const task = await this.d.task(ref);
+    if (!task) return bad(404, `no task ${ref} in this company`);
+    if (task.status === "done" || task.status === "cancelled") return bad(409, `${task.identifier ?? ref} is ${task.status}`);
+    await this.d.step(task.id, text);
+    return ok({ step: text, task: task.identifier ?? task.id, note: "Shown on the task's progress card in Mattermost (no one is notified)." });
   }
 
   /**

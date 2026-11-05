@@ -251,6 +251,7 @@ class Tenant {
         return { userId: [...people].find(([, p]) => p.email === email)?.[0] ?? null, username: u.username };
       },
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
+      step: (issueId, text) => work.addStep(issueId, text),
       askApproval: async (req) => {
         if (!paperclipUrl || !approvers.size) throw Object.assign(new Error("this needs a person's approval, and nobody can approve from Mattermost yet (the plugin needs its Paperclip public URL and approvers set)"), { status: 403 });
         const { message, props } = requestCard(req, actionUrl, key);
@@ -558,6 +559,10 @@ const plugin = definePlugin({
       await work?.threadUpdate(e.entityId);
       await tenants.get(e.companyId)?.auto?.changed(e.entityId);
       await tenants.get(e.companyId)?.routines?.updated(e.entityId);
+    }));
+    // An agent picked the task up: its progress card appears in the thread right away.
+    ctx.events.on("issue.checked_out", (e) => quietly("could not show a task being picked up", async () => {
+      if (e.entityId) await tenants.get(e.companyId)?.work?.threadUpdate(e.entityId);
     }));
     ctx.events.on("plugin.agent-computer.needs-person", (e) => quietly("could not post a computer help request", async () => {
       await tenants.get(e.companyId)?.computerNeedsPerson((e.payload ?? {}) as never);

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Actions, type MmClient, type PendingRequest } from "../src/actions.ts";
-import { WorkLinks, type TaskComment } from "../src/worklinks.ts";
+import { WorkLinks, progressText, type TaskComment } from "../src/worklinks.ts";
 import { broadcastMention, canManage, channelSlug } from "../src/policy.ts";
 
 const CH = "c".repeat(26);
@@ -309,7 +309,8 @@ test("progress card: one post in the thread, edited as the task moves; the resul
   assert.equal(posts.length, 0, "still queued, nothing said: no card");
   status = "in_progress";
   await work.threadUpdate("i");
-  assert.deepEqual(posts.map((p) => p.text), [":arrows_counterclockwise: In progress · **BAD-1387** Restore client reporting · Client Reporting"]);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].text, /^:arrows_counterclockwise: In progress · \*\*BAD-1387\*\* Restore client reporting · Client Reporting · started \d\d:\d\d UTC$/);
   comments.push({ id: "k1", body: "Retrieved the Oct 29 drafts.\nNov 2/3 produced zero.", authorAgentId: "a-ceo", createdAt: new Date() });
   await work.threadUpdate("i");
   await work.threadUpdate("i"); // nothing new: no edit
@@ -391,4 +392,44 @@ test("a nudge on a task no thread asked for links it to this thread", async () =
   await actions.handle("a-cto", "nudge", { task: "BAD-5" }, { message: "go" });
   assert.deepEqual(store.get("issuethread:t-5"), { channelId: "ch", rootId: "root", agentId: "a-cto", status: "todo" });
   assert.equal(store.get("issuefollows:t-5"), undefined);
+});
+
+test("steps: an agent's steps show on the progress card, the current one still going, all ticked once done", async () => {
+  const store = new Map<string, unknown>([["issuethread:t-7", { channelId: "dm", rootId: "r", agentId: "a-fl", status: "todo" }]]);
+  const fakeStore = { get: async <T,>(k: string) => (store.has(k) ? structuredClone(store.get(k)) : null) as T | null, set: async (k: string, v: unknown) => { store.set(k, v); } };
+  let status = "todo";
+  const cards: string[] = [];
+  const work = new WorkLinks({
+    sleep: async () => {}, store: fakeStore,
+    post: async (_a, _c, _r, text) => { cards.push(text); return "card-1"; },
+    edit: async (_id, text) => { cards.push(text); },
+    hasBot: () => true, agentName: () => "Factory Liaison", channelName: async () => "",
+    task: async () => ({ identifier: "BAD-1633", title: "Save GitHub identity", status, assigneeAgentId: "a-fl" }),
+    comments: async () => status === "done" ? [{ id: "c", body: "Saved and verified.", createdAt: new Date() }] : [],
+  });
+  const actions = new Actions({
+    bot: () => ({}) as never, manager: {} as never, agents: () => [], canTalk: async () => true, format: (t: string) => t, newId: () => "x",
+    store: fakeStore, origin: () => null,
+    task: async () => ({ id: "t-7", identifier: "BAD-1633", title: "Save GitHub identity", status }),
+    step: (id: string, text: string) => work.addStep(id, text),
+  } as never);
+  status = "in_progress";
+  await work.threadUpdate("t-7"); // picked up (checked out): the card appears
+  assert.match(cards[0], /^:arrows_counterclockwise: In progress · \*\*BAD-1633\*\* Save GitHub identity · Factory Liaison · started \d\d:\d\d UTC$/);
+  assert.equal((await actions.handle("a-fl", "step", { task: "BAD-1633" }, { text: "Checking for a GitHub token" })).status, 200);
+  await actions.handle("a-fl", "step", { task: "BAD-1633" }, { text: "Checking for a GitHub token" }); // repeated: once
+  await actions.handle("a-fl", "step", { task: "BAD-1633" }, { text: "Verifying reads on BadAaas/leadrvision" });
+  assert.match(cards.at(-1)!, /\n:white_check_mark: Checking for a GitHub token\n:hourglass_flowing_sand: Verifying reads on BadAaas\/leadrvision$/);
+  assert.equal((await actions.handle("a-fl", "step", { task: "BAD-1633" }, { text: "" })).status, 400);
+  status = "done";
+  await work.threadUpdate("t-7");
+  assert.match(cards.find((c) => c.includes("The result is below"))!, /:white_check_mark: Checking for a GitHub token\n:white_check_mark: Verifying reads on BadAaas\/leadrvision\n_The result is below._/);
+  assert.equal((await actions.handle("a-fl", "step", { task: "BAD-1633" }, { text: "late" })).status, 409, "no steps on a finished task");
+});
+
+test("progress card: more than six steps shows the latest six and counts the rest", () => {
+  const steps = Array.from({ length: 9 }, (_, i) => ({ text: `step ${i + 1}`, at: i }));
+  const text = progressText({ identifier: "BAD-1", title: "T", status: "in_progress" }, undefined, () => "", steps);
+  assert.match(text, /_3 earlier steps_\n:white_check_mark: step 4\n/);
+  assert.match(text, /:hourglass_flowing_sand: step 9$/);
 });

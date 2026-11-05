@@ -17,10 +17,18 @@ const PROGRESS: Record<string, string> = {
 };
 
 /** The progress card: status, task, who is on it; its latest comment while it runs, a pointer to the result once it ends. */
-export function progressText(task: { identifier?: string | null; title: string; status: string; assigneeAgentId?: string | null }, latest: TaskComment | undefined, agentName: (id: string) => string): string {
+export function progressText(task: { identifier?: string | null; title: string; status: string; assigneeAgentId?: string | null }, latest: TaskComment | undefined, agentName: (id: string) => string, steps: Step[] = [], startedAt?: number): string {
   const who = task.assigneeAgentId ? ` · ${agentName(task.assigneeAgentId)}` : "";
-  const head = `${PROGRESS[task.status] ?? task.status} · **${task.identifier ?? "The task"}** ${task.title}${who}`;
-  if (THREAD_REPORTS[task.status]) return `${head}\n_The result is below._`;
+  const since = startedAt ? ` · started ${new Date(startedAt).toISOString().slice(11, 16)} UTC` : "";
+  const head = `${PROGRESS[task.status] ?? task.status} · **${task.identifier ?? "The task"}** ${task.title}${who}${since}`;
+  const closed = Boolean(THREAD_REPORTS[task.status]);
+  // The agent's own steps, newest last: done ones ticked, the current one still going.
+  const shown = steps.slice(-MAX_STEPS);
+  const list = shown.map((s, i) => `${closed || i < shown.length - 1 ? ":white_check_mark:" : ":hourglass_flowing_sand:"} ${s.text}`);
+  if (steps.length > shown.length) list.unshift(`_${steps.length - shown.length} earlier steps_`);
+  const stepLines = list.length ? `\n${list.join("\n")}` : "";
+  if (closed) return `${head}${stepLines}\n_The result is below._`;
+  if (steps.length) return `${head}${stepLines}`;
   const body = latest?.body?.trim();
   if (!body) return head;
   const author = latest!.authorAgentId ? agentName(latest!.authorAgentId) : "A team member";
@@ -46,6 +54,10 @@ export async function finalComment(list: () => Promise<TaskComment[]>, sleep = (
   }
   return got.at(-1);
 }
+
+export interface Step { text: string; at: number }
+/** Steps shown on a progress card; older ones are counted. */
+const MAX_STEPS = 6;
 
 export interface TaskComment { id: string; body: string; authorAgentId?: string | null; createdAt?: string | Date }
 export interface WorkDeps {
@@ -126,6 +138,16 @@ export class WorkLinks {
     });
   }
 
+  /** An agent started a step on a task: kept (the last 50) and shown on its progress cards. */
+  async addStep(issueId: string, text: string): Promise<void> {
+    await this.serial(`thread:${issueId}`, async () => {
+      const steps = (await this.d.store.get<Step[]>(`steps:${issueId}`)) ?? [];
+      if (steps.at(-1)?.text === text) return;
+      await this.d.store.set(`steps:${issueId}`, [...steps, { text, at: Date.now() }].slice(-50));
+    });
+    await this.threadUpdate(issueId);
+  }
+
   /** The thread a task was asked for in, then threads that follow it (nudged from there). */
   private async threads(issueId: string): Promise<ThreadTarget[]> {
     const out: ThreadTarget[] = [{ key: `issuethread:${issueId}`, card: `progress:${issueId}` }];
@@ -145,21 +167,23 @@ export class WorkLinks {
     if (!at) return;
     const task = await this.d.task(issueId);
     if (!task) return;
-    const card = await this.d.store.get<{ postId: string; text: string }>(target.card);
+    const card = await this.d.store.get<{ postId: string; text: string; startedAt?: number }>(target.card);
+    const steps = (await this.d.store.get<Step[]>(`steps:${issueId}`)) ?? [];
     const comments = await this.d.comments(issueId);
     const closed = Boolean(THREAD_REPORTS[task.status]);
     // Started: picked up (out of the queue) or commented on. A task that finishes before that needs no card.
-    if (!card && (closed || (["backlog", "todo"].includes(task.status) && !comments.length))) return;
+    if (!card && (closed || (["backlog", "todo"].includes(task.status) && !comments.length && !steps.length))) return;
     const by = [at.agentId, task.assigneeAgentId].find((a): a is string => Boolean(a && this.d.hasBot(a)));
     if (!by) return;
-    const text = progressText(task, closed ? undefined : comments.at(-1), (id) => this.d.agentName(id));
+    const startedAt = card?.startedAt ?? Date.now();
+    const text = progressText(task, closed ? undefined : comments.at(-1), (id) => this.d.agentName(id), steps, startedAt);
     if (card?.text === text) return;
     if (card) {
       await this.d.edit(card.postId, text);
       await this.d.store.set(target.card, { ...card, text });
     } else {
       const postId = await this.d.post(by, at.channelId, at.rootId, text);
-      if (postId) await this.d.store.set(target.card, { postId, text });
+      if (postId) await this.d.store.set(target.card, { postId, text, startedAt });
     }
   }
 

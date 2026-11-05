@@ -42,6 +42,12 @@ tell whoever you are working with and carry on. A 403 says why something is not 
 
 ## While you work
 
+**Show your steps.** In a task run, when you start each major step, post it in a few words:
+POST /mm/tasks/<task>/step {"text": "Checking the Railway service"}. It updates the task's progress
+card in the Mattermost thread it came from (nobody is notified), so the person who asked sees what
+you are doing. One call per real step (3 to 8 in a typical task), not per tool call. Keep using the
+task's last comment for the outcome.
+
 If people write in the thread you are answering while you work (a correction, "stop", "never mind"),
 it reaches you: GET /mm/inbox returns those messages, and any other /mm call you make carries them
 as \`newMessages\`. Check /mm/inbox between steps of anything that takes more than a minute or two,
@@ -73,6 +79,7 @@ Channels (POST, JSON body):
 - /mm/channels/{channel}/update  {"purpose": "...", "header": "...", "name": "..."}  yours only
 - /mm/channels/{channel}/archive {}                                   yours only
 - /mm/tasks/{task}/nudge         {"message": "Railway and Cloudflare access added; continue"}
+- /mm/tasks/{task}/step          {"text": "Reading the DNS records"}   the step you are starting now
   only while answering a person in Mattermost; {task} is its number (BAD-1127) or id
 
 {channel} is a channel's id, its URL name (inc-checkout-5xx) or its display name.
