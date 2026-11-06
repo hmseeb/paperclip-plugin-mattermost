@@ -39,8 +39,11 @@ export interface CardDeps {
   key: string;
   paperclipUrl: string;
   channelFor: ChannelFor;
-  /** The Mattermost thread a task was asked for in, and the agent that thread is with. */
-  threadOf(issueId: string): Promise<{ channelId: string; rootId: string; agentId?: string } | null>;
+  /**
+   * The Mattermost threads waiting on a task's decisions, each with the agent that thread is with: the
+   * thread it was asked for in, threads that follow it, and threads of blocked tasks waiting on it.
+   */
+  threadsOf(issue: { id: string; identifier?: string | null }): Promise<{ channelId: string; rootId: string; agentId?: string }[]>;
   approvers: Map<string, string>;
   /** A Paperclip user as an @mention (or their name when they have no Mattermost account), or null. */
   mention?(userId: string): Promise<string | null>;
@@ -51,7 +54,7 @@ export interface CardDeps {
 
 interface Picked { optionId: string; label: string; by: string; typed?: boolean }
 /** A posted card; for questions, the picks so far and who sent the answers. */
-interface Tracked { postId: string; issueId: string; by?: string; picks?: Record<string, Picked>; sent?: string; /** Who the card is for, as written on it ("@jasmin"). */ for?: string; /** The same card in the thread the task was asked for in. */ threadPostId?: string }
+interface Tracked { postId: string; issueId: string; by?: string; picks?: Record<string, Picked>; sent?: string; /** Who the card is for, as written on it ("@jasmin"). */ for?: string; /** The same card in the thread the task was asked for in (cards posted before 0.31). */ threadPostId?: string; /** Copies in threads waiting on it, by thread root. */ threadPosts?: Record<string, string> }
 interface Question { id: string; prompt?: string; helpText?: string; selectionMode?: string; allowOther?: boolean; options?: { id: string; label?: string; freeText?: boolean }[] }
 
 /** Questions answerable with buttons: every one single-choice with options to click. */
@@ -212,12 +215,17 @@ export class Cards {
           // Posted before it was also sent to threads (or before the thread was known): copy it there once,
           // if it is recent; an old card turning up in an old thread surprises more than it helps.
           const t = posted[c.id];
-          if (!t.threadPostId && now.getTime() - new Date(c.createdAt).getTime() < CATCH_UP_MS) {
-            const thread = await d.threadOf(issue.id);
+          if (now.getTime() - new Date(c.createdAt).getTime() < CATCH_UP_MS) {
             const agentId = c.createdByAgentId ?? issue.assigneeAgentId ?? null;
-            if (thread && thread.channelId !== (await home(agentId))?.channelId) {
+            const homeId = (await home(agentId))?.channelId;
+            const threads = await d.threadsOf(issue);
+            // A card from before 0.31 has one copy, in the task's own thread (listed first).
+            if (t.threadPostId && !t.threadPosts) t.threadPosts = threads[0] ? { [threads[0].rootId]: t.threadPostId } : {};
+            for (const thread of threads) {
+              if (thread.channelId === homeId || t.threadPosts?.[thread.rootId]) continue;
               const { message, props } = renderCard(c, issue, d.agentName(agentId), d, undefined, t);
-              t.threadPostId = await d.poster.post(thread.agentId ?? agentId, { channelId: thread.channelId, rootId: thread.rootId }, message, props);
+              const id = await d.poster.post(thread.agentId ?? agentId, { channelId: thread.channelId, rootId: thread.rootId }, message, props).catch(() => null);
+              if (id) t.threadPosts = { ...t.threadPosts, [thread.rootId]: id };
             }
           }
         } else if (c.status === "pending" && new Date(c.createdAt).getTime() > Date.parse(since)) {
@@ -225,16 +233,21 @@ export class Cards {
           const where = await home(agentId);
           // Also where the person is waiting: the thread the task was asked for in, posted by the agent that
           // thread is with (another agent's bot cannot post in that DM).
-          const thread = await d.threadOf(issue.id);
-          if (!where && !thread) continue; // nowhere to post: tried again on the next pass
+          const threads = (await d.threadsOf(issue)).filter((th) => th.channelId !== where?.channelId);
+          if (!where && !threads.length) continue; // nowhere to post: tried again on the next pass
           // Only the person the decision is for is pinged: whom the agent addressed, else whom the task is for.
           const who = c.addresseeUserId ?? issue.responsibleUserId;
           const mention = who && d.mention ? (await d.mention(who).catch(() => null)) ?? undefined : undefined;
           const { message, props } = renderCard(c, issue, d.agentName(agentId), d, undefined, { for: mention });
-          const inThread = thread && thread.channelId !== where?.channelId
-            ? await d.poster.post(thread.agentId ?? agentId, { channelId: thread.channelId, rootId: thread.rootId }, message, props) : undefined;
-          const postId = where ? await d.poster.post(agentId, { channelId: where.channelId, rootId: "" }, where.note ? `${message}\n_${where.note}_` : message, props) : inThread!;
-          posted[c.id] = { postId, issueId: issue.id, ...(inThread ? { threadPostId: inThread } : {}), ...(mention ? { for: mention } : {}) };
+          const threadPosts: Record<string, string> = {};
+          for (const th of threads) {
+            const id = await d.poster.post(th.agentId ?? agentId, { channelId: th.channelId, rootId: th.rootId }, message, props).catch(() => null);
+            if (id) threadPosts[th.rootId] = id;
+          }
+          const first = Object.values(threadPosts)[0];
+          if (!where && !first) continue;
+          const postId = where ? await d.poster.post(agentId, { channelId: where.channelId, rootId: "" }, where.note ? `${message}\n_${where.note}_` : message, props) : first!;
+          posted[c.id] = { postId, issueId: issue.id, threadPosts, ...(mention ? { for: mention } : {}) };
         }
       }
     }
@@ -256,7 +269,7 @@ export class Cards {
   }
 
   private async patchAll(t: Tracked, message: string, props: Record<string, unknown>): Promise<void> {
-    for (const id of new Set([t.postId, t.threadPostId])) if (id) await this.d.poster.patch(id, message, props).catch(() => {});
+    for (const id of new Set([t.postId, t.threadPostId, ...Object.values(t.threadPosts ?? {})])) if (id) await this.d.poster.patch(id, message, props).catch(() => {});
   }
 
   /**

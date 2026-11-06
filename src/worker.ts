@@ -213,10 +213,46 @@ class Tenant {
       respond: async (issueId, cardId, action, actorUserId, reason) => { await ctx.issues.respondInteraction(issueId, cardId, { action, actorUserId, reason }, companyId); },
       comment: async (issueId, body, actorUserId) => { await ctx.issues.createComment(issueId, body, companyId, { actorUserId }); },
       agentName, store, actionUrl, key, paperclipUrl, channelFor, approvers,
-      threadOf: (issueId) => store.get<{ channelId: string; rootId: string; agentId?: string }>(`issuethread:${issueId}`),
+      threadsOf: (issue) => waitingThreads(issue),
       mention: (userId) => mention(userId),
       openDialog: async (triggerId, dialog) => { await manager.request("POST", "/actions/dialogs/open", { trigger_id: triggerId, url: actionUrl, dialog }); },
     }) : null;
+    // Threads waiting on a task's decisions: the thread it was asked for in, threads that follow it, and
+    // threads of blocked tasks that name it (Paperclip's "blocks" links need a permission this plugin
+    // does not have; agents name the blocker in the blocked task's comments). Blocked tasks: read once a minute.
+    type Thread = { channelId: string; rootId: string; agentId?: string };
+    let blockedCache: { at: number; tasks: { id: string; text: string }[] } | null = null;
+    const blockedTasks = async () => {
+      if (blockedCache && Date.now() - blockedCache.at < 60_000) return blockedCache.tasks;
+      const tasks: { id: string; text: string }[] = [];
+      for (const b of await ctx.issues.list({ companyId, status: "blocked", limit: 200 })) {
+        if (!(await store.get(`issuethread:${b.id}`))) continue;
+        const recent = (await ctx.issues.listComments(b.id, companyId)).slice(0, 10).map((c) => c.body);
+        tasks.push({ id: b.id, text: [b.title, b.description ?? "", ...recent].join("\n") });
+      }
+      blockedCache = { at: Date.now(), tasks };
+      return tasks;
+    };
+    const threadsOf = async (issueId: string): Promise<Thread[]> => {
+      const out: Thread[] = [];
+      const own = await store.get<Thread>(`issuethread:${issueId}`);
+      if (own) out.push(own);
+      for (const root of (await store.get<string[]>(`issuefollows:${issueId}`)) ?? []) {
+        const f = await store.get<Thread>(`issuefollow:${issueId}:${root}`);
+        if (f) out.push(f);
+      }
+      return out;
+    };
+    const waitingThreads = async (issue: { id: string; identifier?: string | null }): Promise<Thread[]> => {
+      const out = await threadsOf(issue.id);
+      if (issue.identifier) {
+        const named = new RegExp(`\\b${issue.identifier.replace(/[^A-Za-z0-9-]/g, "")}\\b`);
+        for (const b of await blockedTasks().catch(() => [])) {
+          if (b.id !== issue.id && named.test(b.text)) out.push(...(await threadsOf(b.id)));
+        }
+      }
+      return [...new Map(out.map((t) => [t.rootId, t])).values()];
+    };
     const poster = this.poster(manager, roster);
     // Paperclip people as Mattermost accounts, by the emails the settings know (approvers, people who can talk to agents).
     const people = new Map<string, { email: string; name?: string }>();

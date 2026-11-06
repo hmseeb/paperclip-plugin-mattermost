@@ -8,7 +8,8 @@ const T0 = "2026-10-28T00:00:00.000Z";
 const later = "2026-10-28T01:00:00.000Z";
 const before = "2026-10-27T23:00:00.000Z";
 
-function setup(perAgent: Record<string, string> = {}, threads: Record<string, { channelId: string; rootId: string; agentId?: string }> = {}) {
+type Th = { channelId: string; rootId: string; agentId?: string };
+function setup(perAgent: Record<string, string> = {}, threads: Record<string, Th | Th[]> = {}) {
   const issues: OpenIssue[] = [{ id: "i1", identifier: "BAD-9", title: "Launch site", assigneeAgentId: "a-cto" }];
   const byIssue = new Map<string, Card[]>([["i1", [
     { id: "old", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: before, payload: { prompt: "Old?" } },
@@ -36,7 +37,7 @@ function setup(perAgent: Record<string, string> = {}, threads: Record<string, { 
     async comment(issueId, body, actor) { comments.push({ issueId, body, actor }); },
     agentName: (id) => (id === "a-ceo" ? "CEO" : "CTO"),
     store: { async get<T>(k: string) { return (state.get(k) ?? null) as T | null; }, async set(k, v) { state.set(k, v); } },
-    actionUrl: "https://pc/hook", key: KEY, paperclipUrl: "https://pc", channelFor: decisionChannels({ channel }, perAgent, "decisions"), threadOf: async (id) => threads[id] ?? null,
+    actionUrl: "https://pc/hook", key: KEY, paperclipUrl: "https://pc", channelFor: decisionChannels({ channel }, perAgent, "decisions"), threadsOf: async (issue) => ([] as { channelId: string; rootId: string; agentId?: string }[]).concat(threads[issue.id] ?? []),
     approvers: new Map([["sam@example.com", "u-sam"]]),
     now: () => new Date(T0),
     openDialog: async (triggerId, dialog) => { dialogs.push({ triggerId, dialog }); },
@@ -287,4 +288,21 @@ test("a card for someone with no Mattermost account mentions nobody", async () =
   t.add({ id: "a3", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo", payload: { prompt: "Ok?" } });
   await t.c.poll();
   assert.match(t.posts[0].message, /^\*\*Decision needed\*\*/);
+});
+
+test("a decision is copied into every thread waiting on it (a blocked task's thread too), and every copy is updated when it is decided", async () => {
+  const own = { channelId: "dm-ceo", rootId: "r-own", agentId: "a-ceo" };
+  const waiting = { channelId: "c-reports", rootId: "r-1878", agentId: "a-rep" };
+  const t = setup({}, { i1: [own, waiting] });
+  await t.c.poll();
+  t.add({ id: "k9", issueId: "i1", kind: "request_confirmation", status: "pending", createdAt: later, createdByAgentId: "a-ceo",
+    payload: { prompt: "Bind the here.now key to Client Reporting?", acceptLabel: "Create binding", rejectLabel: "No" } });
+  await t.c.poll();
+  await t.c.poll();
+  assert.deepEqual(t.posts.map((p) => [p.as, p.channelId, p.rootId ?? ""]).sort(), [["a-ceo", "c-dec", ""], ["a-ceo", "dm-ceo", "r-own"], ["a-rep", "c-reports", "r-1878"]].sort());
+  t.byIssue.get("i1")!.find((x) => x.id === "k9")!.status = "accepted";
+  await t.c.poll();
+  const copies = t.posts.filter((p) => JSON.stringify(p).includes("here.now"));
+  assert.equal(copies.length, 3);
+  for (const p of copies) assert.doesNotMatch(JSON.stringify(p.props), /Create binding/, "buttons removed on every copy");
 });
